@@ -2,12 +2,13 @@ import { useEffect, useState } from 'react'
 import { supabase } from './supabaseClient'
 import Login from './Login'
 import Layout from './Layout'
+import Cases from './pages/Cases'
 
 function App() {
   const [session, setSession] = useState(null)
   const [staff, setStaff] = useState(null)
   const [loading, setLoading] = useState(true)
-  const [currentPage, setCurrentPage] = useState('dashboard')
+  const [currentPage, setCurrentPage] = useState('cases')
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -44,21 +45,21 @@ function App() {
 
   if (!session) return <Login />
 
+  function renderPage() {
+    switch (currentPage) {
+      case 'cases': return <Cases staff={staff} />
+      default: return (
+        <div style={{ padding: '2rem', fontFamily: 'sans-serif' }}>
+          <h2 style={{ color: '#0C447C', marginBottom: '0.5rem', textTransform: 'capitalize' }}>{currentPage}</h2>
+          <p style={{ color: '#888', fontSize: '13px' }}>This screen is coming soon.</p>
+        </div>
+      )
+    }
+  }
+
   return (
-    <Layout
-      user={session.user}
-      staff={staff}
-      currentPage={currentPage}
-      setCurrentPage={setCurrentPage}
-    >
-      <div style={{ padding: '2rem', fontFamily: 'sans-serif' }}>
-        <h2 style={{ color: '#0C447C', marginBottom: '0.5rem', textTransform: 'capitalize' }}>
-          {currentPage}
-        </h2>
-        <p style={{ color: '#888', fontSize: '13px' }}>
-          This screen is coming soon.
-        </p>
-      </div>
+    <Layout user={session.user} staff={staff} currentPage={currentPage} setCurrentPage={setCurrentPage}>
+      {renderPage()}
     </Layout>
   )
 }
