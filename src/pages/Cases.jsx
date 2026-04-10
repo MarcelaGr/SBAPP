@@ -1,3 +1,4 @@
+import NewCaseForm from './NewCaseForm'
 import { useEffect, useState, useRef } from 'react'
 import { supabase } from '../supabaseClient'
 
@@ -5,6 +6,7 @@ export default function Cases({ staff }) {
   const [cases, setCases] = useState([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
+  const [showNewCase, setShowNewCase] = useState(false)
   const [statusFilter, setStatusFilter] = useState('all')
   const [categoryFilter, setCategoryFilter] = useState('all')
   const [selectedCase, setSelectedCase] = useState(null)
@@ -500,9 +502,21 @@ export default function Cases({ staff }) {
     <div style={{ padding: '1.25rem', fontFamily: 'sans-serif' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem', flexWrap: 'wrap', gap: '8px' }}>
         <div style={{ fontSize: '15px', fontWeight: '500', color: '#2c2c2a' }}>Cases</div>
-        <button style={{ padding: '6px 14px', background: '#0C447C', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '12px', fontWeight: '500', cursor: 'pointer' }}>
-          + New case
-        </button>
+        <button
+  onClick={() => setShowNewCase(true)}
+  style={{ padding: '6px 14px', background: '#0C447C', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '12px', fontWeight: '500', cursor: 'pointer' }}>
+  + New case
+</button>
+      {showNewCase && (
+  <NewCaseForm
+    staff={staff}
+    onClose={() => setShowNewCase(false)}
+    onCreated={(newCase) => {
+      setShowNewCase(false)
+      fetchCases()
+    }}
+  />
+)}
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0,1fr))', gap: '10px', marginBottom: '1rem' }}>
