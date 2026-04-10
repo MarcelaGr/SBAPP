@@ -1,3 +1,4 @@
+import Clients from './pages/Clients'
 import { useEffect, useState } from 'react'
 import { supabase } from './supabaseClient'
 import Login from './Login'
@@ -48,6 +49,7 @@ function App() {
   function renderPage() {
     switch (currentPage) {
       case 'cases': return <Cases staff={staff} />
+      case 'clients': return <Clients staff={staff} />
       default: return (
         <div style={{ padding: '2rem', fontFamily: 'sans-serif' }}>
           <h2 style={{ color: '#0C447C', marginBottom: '0.5rem', textTransform: 'capitalize' }}>{currentPage}</h2>
