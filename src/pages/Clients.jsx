@@ -179,25 +179,36 @@ function ClientDetail({ client: initialClient, onBack, onDeleted, staff }) {
   const [showEditForm, setShowEditForm] = useState(false)
   const [deleting, setDeleting] = useState(false)
 
-  useEffect(() => { fetchClientCases() }, [client.id])
-
-  async function fetchClientCases() {
-    setCasesLoading(true)
-    const { data } = await supabase
-      .from('cases')
-      .select('*, associations(short_name), case_attorneys(is_lead, staff(full_name, initials))')
-      .eq('client_id', client.id)
-      .order('created_at', { ascending: false })
-    setCases(data || [])
-    setCasesLoading(false)
-  }
-
   async function deleteClient() {
     setDeleting(true)
     await supabase.from('clients').update({ active: false }).eq('id', client.id)
     setDeleting(false)
     onDeleted(client.id)
   }
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadClientCases() {
+      setCasesLoading(true)
+
+      const { data } = await supabase
+        .from('cases')
+        .select('*, associations(short_name), case_attorneys(is_lead, staff(full_name, initials))')
+        .eq('client_id', client.id)
+        .order('created_at', { ascending: false })
+
+      if (cancelled) return
+      setCases(data || [])
+      setCasesLoading(false)
+    }
+
+    loadClientCases()
+
+    return () => {
+      cancelled = true
+    }
+  }, [client.id])
 
   const formatDate = (d) => d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'
 
@@ -373,17 +384,27 @@ export default function Clients({ staff }) {
   const [selectedClient, setSelectedClient] = useState(null)
   const [showNewClient, setShowNewClient] = useState(false)
 
-  useEffect(() => { fetchClients() }, [])
+  useEffect(() => {
+    let cancelled = false
 
-  async function fetchClients() {
-    const { data } = await supabase
-      .from('clients')
-      .select('*, associations(short_name, name)')
-      .eq('active', true)
-      .order('last_name')
-    setClients(data || [])
-    setLoading(false)
-  }
+    async function loadClients() {
+      const { data } = await supabase
+        .from('clients')
+        .select('*, associations(short_name, name)')
+        .eq('active', true)
+        .order('last_name')
+
+      if (cancelled) return
+      setClients(data || [])
+      setLoading(false)
+    }
+
+    loadClients()
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const filtered = clients.filter(c => {
     const q = search.toLowerCase()

@@ -1,4 +1,6 @@
 import Clients from './pages/Clients'
+import Calendar from './pages/Calendar'
+import CaseList from './pages/CaseList'
 import { useEffect, useState } from 'react'
 import { supabase } from './supabaseClient'
 import Login from './Login'
@@ -11,32 +13,40 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [currentPage, setCurrentPage] = useState('cases')
 
+  async function fetchStaff(userId) {
+    const { data, error } = await supabase
+      .from('staff')
+      .select('*')
+      .eq('id', userId)
+      .single()
+
+    setStaff(error ? null : data)
+    setLoading(false)
+  }
+
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session)
       if (session) fetchStaff(session.user.id)
-      else setLoading(false)
+      else {
+        setStaff(null)
+        setLoading(false)
+      }
     })
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       (_event, session) => {
         setSession(session)
         if (session) fetchStaff(session.user.id)
+        else {
+          setStaff(null)
+          setLoading(false)
+        }
       }
     )
 
     return () => subscription.unsubscribe()
   }, [])
-
-  async function fetchStaff(userId) {
-    const { data } = await supabase
-      .from('staff')
-      .select('*')
-      .eq('id', userId)
-      .single()
-    setStaff(data)
-    setLoading(false)
-  }
 
   if (loading) return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', fontFamily: 'sans-serif', color: '#888' }}>
@@ -50,6 +60,8 @@ function App() {
     switch (currentPage) {
       case 'cases': return <Cases staff={staff} />
       case 'clients': return <Clients staff={staff} />
+      case 'calendar': return <Calendar staff={staff} />
+      case 'caselist': return staff?.role === 'admin' ? <CaseList /> : null
       default: return (
         <div style={{ padding: '2rem', fontFamily: 'sans-serif' }}>
           <h2 style={{ color: '#0C447C', marginBottom: '0.5rem', textTransform: 'capitalize' }}>{currentPage}</h2>

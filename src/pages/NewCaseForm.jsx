@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../supabaseClient'
 
-export default function NewCaseForm({ staff, onClose, onCreated }) {
+export default function NewCaseForm({ onClose, onCreated }) {
   const [associations, setAssociations] = useState([])
   const [attorneys, setAttorneys] = useState([])
   const [clientSearch, setClientSearch] = useState('')
@@ -29,37 +29,54 @@ export default function NewCaseForm({ staff, onClose, onCreated }) {
   })
 
   useEffect(() => {
-    fetchAssociations()
-    fetchAttorneys()
+    let cancelled = false
+
+    async function loadFormOptions() {
+      const [associationsRes, attorneysRes] = await Promise.all([
+        supabase.from('associations').select('*').eq('active', true).order('short_name'),
+        supabase.from('staff').select('*').eq('role', 'attorney').eq('active', true).order('full_name')
+      ])
+
+      if (cancelled) return
+      setAssociations(associationsRes.data || [])
+      setAttorneys(attorneysRes.data || [])
+    }
+
+    loadFormOptions()
+
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   useEffect(() => {
-    if (clientSearch.length < 2) { setClientResults([]); return }
-    const timer = setTimeout(() => searchClients(clientSearch), 300)
-    return () => clearTimeout(timer)
+    let cancelled = false
+
+    if (clientSearch.length < 2) {
+      return undefined
+    }
+
+    const timer = setTimeout(async () => {
+      if (cancelled) return
+      setSearching(true)
+
+      const { data } = await supabase
+        .from('clients')
+        .select('*')
+        .or(`first_name.ilike.%${clientSearch}%,last_name.ilike.%${clientSearch}%,email.ilike.%${clientSearch}%`)
+        .eq('active', true)
+        .limit(6)
+
+      if (cancelled) return
+      setClientResults(data || [])
+      setSearching(false)
+    }, 300)
+
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
   }, [clientSearch])
-
-  async function fetchAssociations() {
-    const { data } = await supabase.from('associations').select('*').eq('active', true).order('short_name')
-    setAssociations(data || [])
-  }
-
-  async function fetchAttorneys() {
-    const { data } = await supabase.from('staff').select('*').eq('role', 'attorney').eq('active', true).order('full_name')
-    setAttorneys(data || [])
-  }
-
-  async function searchClients(q) {
-    setSearching(true)
-    const { data } = await supabase
-      .from('clients')
-      .select('*')
-      .or(`first_name.ilike.%${q}%,last_name.ilike.%${q}%,email.ilike.%${q}%`)
-      .eq('active', true)
-      .limit(6)
-    setClientResults(data || [])
-    setSearching(false)
-  }
 
   function setField(key, value) {
     setForm(prev => ({ ...prev, [key]: value }))
@@ -199,7 +216,7 @@ export default function NewCaseForm({ staff, onClose, onCreated }) {
                   placeholder="Type client name or email..."
                   style={inputStyle}
                 />
-                {(clientResults.length > 0 || searching) && (
+                {clientSearch.length >= 2 && (clientResults.length > 0 || searching) && (
                   <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: '#fff', border: '0.5px solid #d3d1c7', borderRadius: '8px', boxShadow: '0 4px 12px rgba(0,0,0,0.08)', zIndex: 10, marginTop: '4px', overflow: 'hidden' }}>
                     {searching && <div style={{ padding: '10px 12px', fontSize: '12px', color: '#888780' }}>Searching...</div>}
                     {clientResults.map(client => (
@@ -215,7 +232,7 @@ export default function NewCaseForm({ staff, onClose, onCreated }) {
                     ))}
                     {!searching && clientResults.length === 0 && clientSearch.length >= 2 && (
                       <div style={{ padding: '10px 12px', fontSize: '12px', color: '#888780' }}>
-                        No clients found. <span style={{ color: '#185FA5', cursor: 'pointer' }}>Create a new client first →</span>
+                        No clients found. Create the client from the Clients screen first.
                       </div>
                     )}
                   </div>

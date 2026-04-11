@@ -27,21 +27,6 @@ export default function Cases({ staff }) {
   const [posting, setPosting] = useState(false)
   const chatEndRef = useRef()
 
-  useEffect(() => { fetchCases() }, [])
-
-  useEffect(() => {
-    if (selectedCase) {
-      fetchDocuments(selectedCase.id)
-      fetchComments(selectedCase.id)
-    }
-  }, [selectedCase])
-
-  useEffect(() => {
-    if (chatEndRef.current) {
-      chatEndRef.current.scrollIntoView({ behavior: 'smooth' })
-    }
-  }, [comments])
-
   async function fetchCases() {
     const { data, error } = await supabase
       .from('cases')
@@ -106,6 +91,76 @@ export default function Cases({ staff }) {
     setUploading(false)
     fileInputRef.current.value = ''
   }
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadCases() {
+      const { data, error } = await supabase
+        .from('cases')
+        .select(`
+          *,
+          clients (id, first_name, last_name, email, phone),
+          associations (id, short_name, name),
+          case_attorneys (attorney_id, is_lead,
+            staff (full_name, initials)
+          )
+        `)
+        .order('created_at', { ascending: false })
+
+      if (cancelled) return
+      if (!error) setCases(data || [])
+      setLoading(false)
+    }
+
+    loadCases()
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadCaseResources() {
+      if (!selectedCase) return
+
+      setDocsLoading(true)
+      setCommentsLoading(true)
+
+      const [documentsRes, commentsRes] = await Promise.all([
+        supabase
+          .from('documents')
+          .select('*, staff (full_name, initials)')
+          .eq('case_id', selectedCase.id)
+          .order('created_at', { ascending: false }),
+        supabase
+          .from('comments')
+          .select('*, staff:author_id (full_name, initials, role)')
+          .eq('case_id', selectedCase.id)
+          .order('created_at', { ascending: true })
+      ])
+
+      if (cancelled) return
+      if (!documentsRes.error) setDocuments(documentsRes.data || [])
+      if (!commentsRes.error) setComments(commentsRes.data || [])
+      setDocsLoading(false)
+      setCommentsLoading(false)
+    }
+
+    if (selectedCase) loadCaseResources()
+
+    return () => {
+      cancelled = true
+    }
+  }, [selectedCase])
+
+  useEffect(() => {
+    if (chatEndRef.current) {
+      chatEndRef.current.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [comments])
 
   async function downloadDocument(doc) {
     const { data } = await supabase.storage
@@ -503,20 +558,20 @@ export default function Cases({ staff }) {
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem', flexWrap: 'wrap', gap: '8px' }}>
         <div style={{ fontSize: '15px', fontWeight: '500', color: '#2c2c2a' }}>Cases</div>
         <button
-  onClick={() => setShowNewCase(true)}
-  style={{ padding: '6px 14px', background: '#0C447C', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '12px', fontWeight: '500', cursor: 'pointer' }}>
-  + New case
-</button>
-      {showNewCase && (
-  <NewCaseForm
-    staff={staff}
-    onClose={() => setShowNewCase(false)}
-    onCreated={(newCase) => {
-      setShowNewCase(false)
-      fetchCases()
-    }}
-  />
-)}
+          onClick={() => setShowNewCase(true)}
+          style={{ padding: '6px 14px', background: '#0C447C', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '12px', fontWeight: '500', cursor: 'pointer' }}>
+          + New case
+        </button>
+        {showNewCase && (
+          <NewCaseForm
+            staff={staff}
+            onClose={() => setShowNewCase(false)}
+            onCreated={() => {
+              setShowNewCase(false)
+              fetchCases()
+            }}
+          />
+        )}
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0,1fr))', gap: '10px', marginBottom: '1rem' }}>
