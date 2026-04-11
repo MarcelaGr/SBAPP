@@ -6,6 +6,8 @@ import { supabase } from './supabaseClient'
 import Login from './Login'
 import Layout from './Layout'
 import Cases from './pages/Cases'
+import Timesheets from './pages/Timesheets'
+import Messages from './pages/Messages'
 
 function App() {
   const [session, setSession] = useState(null)
@@ -62,6 +64,8 @@ function App() {
       case 'clients': return <Clients staff={staff} />
       case 'calendar': return <Calendar staff={staff} />
       case 'caselist': return staff?.role === 'admin' ? <CaseList /> : null
+      case 'timesheets': return <Timesheets staff={staff} />
+      case 'messages': return <Messages staff={staff} />
       default: return (
         <div style={{ padding: '2rem', fontFamily: 'sans-serif' }}>
           <h2 style={{ color: '#0C447C', marginBottom: '0.5rem', textTransform: 'capitalize' }}>{currentPage}</h2>
