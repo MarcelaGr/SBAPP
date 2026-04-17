@@ -2,6 +2,14 @@ import { useState } from 'react'
 import { supabase } from './supabaseClient'
 
 const navItems = [
+  { key: 'dashboard', label: 'Dashboard', adminOnly: false, icon: (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <rect x="2" y="2" width="5" height="5" rx="1"/>
+      <rect x="9" y="2" width="5" height="5" rx="1"/>
+      <rect x="2" y="9" width="5" height="5" rx="1"/>
+      <rect x="9" y="9" width="5" height="5" rx="1"/>
+    </svg>
+  )},
   { key: 'cases', label: 'Cases', adminOnly: false, icon: (
     <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
       <rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M5 3V2M11 3V2M2 7h12"/>
@@ -28,7 +36,7 @@ const navItems = [
       <path d="M2 4h12M2 8h8M2 12h5"/>
     </svg>
   )},
-  { key: 'invoices', label: 'Invoices', adminOnly: false, icon: (
+  { key: 'invoices', label: 'Invoices', adminOnly: true, icon: (
     <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
       <rect x="2" y="2" width="12" height="12" rx="1.5"/><path d="M5 8h6M5 5h6M5 11h4"/>
     </svg>
@@ -39,9 +47,10 @@ const navItems = [
       <path d="M2 6h12"/>
     </svg>
   )},
-  { key: 'settings', label: 'Settings', adminOnly: false, icon: (
+  { key: 'settings', label: 'Settings', adminOnly: true, icon: (
     <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-      <circle cx="8" cy="8" r="6"/><path d="M8 5v3l2 2"/>
+      <circle cx="8" cy="8" r="2.5"/>
+      <path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41"/>
     </svg>
   )},
 ]
