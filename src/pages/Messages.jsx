@@ -1,5 +1,6 @@
-import { useEffect, useState, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { supabase } from '../supabaseClient'
+import { isAdminRole } from '../lib/roles'
 
 export default function Messages({ staff }) {
   const [channels, setChannels] = useState([])
@@ -13,8 +14,26 @@ export default function Messages({ staff }) {
   const [messagesLoading, setMessagesLoading] = useState(false)
   const [showNewDM, setShowNewDM] = useState(false)
   const [search, setSearch] = useState('')
+  const [error, setError] = useState('')
   const chatEndRef = useRef()
   const realtimeRef = useRef()
+
+  function mergeMessage(incomingMessage) {
+    if (!incomingMessage?.id) return
+
+    setMessages((prev) => {
+      const existingIndex = prev.findIndex((item) => item.id === incomingMessage.id)
+      if (existingIndex >= 0) {
+        const next = [...prev]
+        next[existingIndex] = { ...next[existingIndex], ...incomingMessage }
+        return next
+      }
+
+      return [...prev, incomingMessage].sort(
+        (left, right) => new Date(left.created_at || 0) - new Date(right.created_at || 0)
+      )
+    })
+  }
 
   useEffect(() => {
     fetchAllStaff()
@@ -32,27 +51,44 @@ export default function Messages({ staff }) {
     fetchMessages(activeChannel.id)
     fetchMembers(activeChannel.id)
 
-    // Real-time subscription
-    if (realtimeRef.current) realtimeRef.current.unsubscribe()
+    if (realtimeRef.current) {
+      supabase.removeChannel(realtimeRef.current)
+      realtimeRef.current = null
+    }
+
     realtimeRef.current = supabase
       .channel(`messages:${activeChannel.id}`)
-      .on('postgres_changes', {
-        event: 'INSERT',
-        schema: 'public',
-        table: 'messages',
-        filter: `channel_id=eq.${activeChannel.id}`
-      }, async (payload) => {
-        // Fetch the full message with sender info
-        const { data } = await supabase
-          .from('messages')
-          .select('*, sender:sender_id(full_name, initials, role)')
-          .eq('id', payload.new.id)
-          .single()
-        if (data) setMessages(prev => [...prev, data])
-      })
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'messages',
+          filter: `channel_id=eq.${activeChannel.id}`,
+        },
+        async (payload) => {
+          if (payload.eventType === 'DELETE') {
+            setMessages((prev) => prev.filter((item) => item.id !== payload.old.id))
+            return
+          }
+
+          const { data } = await supabase
+            .from('messages')
+            .select('*, sender:sender_id(full_name, initials, role)')
+            .eq('id', payload.new.id)
+            .maybeSingle()
+
+          if (data) mergeMessage(data)
+        }
+      )
       .subscribe()
 
-    return () => { if (realtimeRef.current) realtimeRef.current.unsubscribe() }
+    return () => {
+      if (realtimeRef.current) {
+        supabase.removeChannel(realtimeRef.current)
+        realtimeRef.current = null
+      }
+    }
   }, [activeChannel])
 
   async function fetchAllStaff() {
@@ -62,11 +98,18 @@ export default function Messages({ staff }) {
 
   async function fetchChannels() {
     setLoading(true)
+    setError('')
     // Get all channels this user is a member of
-    const { data: memberOf } = await supabase
+    const { data: memberOf, error: memberError } = await supabase
       .from('channel_members')
       .select('channel_id')
       .eq('staff_id', staff?.id)
+
+    if (memberError) {
+      setError(memberError.message)
+      setLoading(false)
+      return
+    }
 
     const channelIds = (memberOf || []).map(m => m.channel_id)
 
@@ -103,7 +146,7 @@ export default function Messages({ staff }) {
     for (const gc of groupChannels || []) {
       const isMember = channelIds.includes(gc.id)
       if (!isMember) {
-        await supabase.from('channel_members').insert({ channel_id: gc.id, staff_id: staff?.id })
+        await supabase.from('channel_members').upsert({ channel_id: gc.id, staff_id: staff?.id }, { onConflict: 'channel_id,staff_id' })
       }
     }
 
@@ -119,12 +162,17 @@ export default function Messages({ staff }) {
 
   async function fetchMessages(channelId) {
     setMessagesLoading(true)
-    const { data } = await supabase
+    const { data, error: fetchError } = await supabase
       .from('messages')
       .select('*, sender:sender_id(full_name, initials, role)')
       .eq('channel_id', channelId)
       .order('created_at', { ascending: true })
       .limit(100)
+
+    if (fetchError) {
+      setError(fetchError.message)
+    }
+
     setMessages(data || [])
     setMessagesLoading(false)
   }
@@ -139,13 +187,53 @@ export default function Messages({ staff }) {
 
   async function sendMessage() {
     if (!newMessage.trim() || !activeChannel || sending) return
+
     setSending(true)
-    await supabase.from('messages').insert({
+    setError('')
+
+    const body = newMessage.trim()
+    const optimisticId = `temp-${Date.now()}`
+    const optimisticMessage = {
+      id: optimisticId,
       channel_id: activeChannel.id,
       sender_id: staff?.id,
-      body: newMessage.trim(),
-    })
+      body,
+      created_at: new Date().toISOString(),
+      sender: {
+        full_name: staff?.full_name,
+        initials: staff?.initials,
+        role: staff?.role,
+      },
+    }
+
+    mergeMessage(optimisticMessage)
     setNewMessage('')
+
+    const { data, error: sendError } = await supabase
+      .from('messages')
+      .insert({
+        channel_id: activeChannel.id,
+        sender_id: staff?.id,
+        body,
+      })
+      .select('*, sender:sender_id(full_name, initials, role)')
+      .single()
+
+    if (sendError) {
+      setMessages((prev) => prev.filter((message) => message.id !== optimisticId))
+      setNewMessage(body)
+      setError(sendError.message)
+      setSending(false)
+      return
+    }
+
+    setMessages((prev) => prev.filter((message) => message.id !== optimisticId))
+    mergeMessage(data)
+    await supabase.from('message_channels').update({ last_message_at: data.created_at }).eq('id', activeChannel.id)
+    setChannels((prev) => {
+      const next = prev.map((channel) => channel.id === activeChannel.id ? { ...channel, last_message_at: data.created_at } : channel)
+      return next.sort((left, right) => new Date(right.last_message_at || 0) - new Date(left.last_message_at || 0))
+    })
     setSending(false)
   }
 
@@ -191,10 +279,10 @@ export default function Messages({ staff }) {
       .single()
 
     if (newChannel) {
-      await supabase.from('channel_members').insert([
+      await supabase.from('channel_members').upsert([
         { channel_id: newChannel.id, staff_id: staff?.id },
         { channel_id: newChannel.id, staff_id: otherStaffId },
-      ])
+      ], { onConflict: 'channel_id,staff_id' })
       const other = allStaff.find(s => s.id === otherStaffId)
       const ch = { ...newChannel, displayName: other?.full_name, otherInitials: other?.initials }
       setChannels(prev => [ch, ...prev])
@@ -239,7 +327,11 @@ export default function Messages({ staff }) {
   }
 
   const dmStaff = allStaff.filter(s => s.id !== staff?.id)
-  const filteredStaff = dmStaff.filter(s => s.full_name.toLowerCase().includes(search.toLowerCase()))
+  const filteredStaff = dmStaff.filter(s =>
+    [s.full_name, s.initials, s.role]
+      .filter(Boolean)
+      .some(value => value.toLowerCase().includes(search.toLowerCase()))
+  )
 
   return (
     <div style={{ height: 'calc(100vh - 0px)', display: 'flex', flexDirection: 'column', fontFamily: 'sans-serif' }}>
@@ -262,6 +354,8 @@ export default function Messages({ staff }) {
           <div style={{ overflow: 'auto', flex: 1 }}>
             {loading ? (
               <div style={{ padding: '1rem', fontSize: '13px', color: '#888780' }}>Loading...</div>
+            ) : error ? (
+              <div style={{ padding: '1rem', fontSize: '13px', color: '#a32d2d' }}>{error}</div>
             ) : (
               <>
                 {/* Direct messages */}
@@ -329,7 +423,7 @@ export default function Messages({ staff }) {
             <>
               {/* Chat header */}
               <div style={{ padding: '1rem 1.25rem', borderBottom: '0.5px solid #d3d1c7', background: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                   {isGroup ? (
                     <div style={{ width: '32px', height: '32px', borderRadius: '50%', background: '#f1efe8', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '14px', color: '#888780', border: '1.5px solid #d3d1c7' }}>#</div>
                   ) : (
@@ -337,13 +431,13 @@ export default function Messages({ staff }) {
                       {activeChannel.otherInitials}
                     </div>
                   )}
-                  <div>
-                    <div style={{ fontSize: '14px', fontWeight: '500', color: '#2c2c2a' }}>{activeChannel.displayName}</div>
-                    <div style={{ fontSize: '11px', color: '#888780', marginTop: '1px' }}>
-                      {isGroup ? `${members.length} members` : 'Direct message'}
+                    <div>
+                      <div style={{ fontSize: '14px', fontWeight: '500', color: '#2c2c2a' }}>{activeChannel.displayName}</div>
+                      <div style={{ fontSize: '11px', color: '#888780', marginTop: '1px' }}>
+                        {isGroup ? `${members.length} members` : isAdminRole(staff?.role) ? 'Direct message' : 'Secure staff message'}
+                      </div>
                     </div>
                   </div>
-                </div>
                 {isGroup && (
                   <div style={{ display: 'flex', gap: '-4px' }}>
                     {members.slice(0, 4).map((m, i) => {
@@ -432,6 +526,11 @@ export default function Messages({ staff }) {
 
               {/* Input */}
               <div style={{ padding: '1rem', background: '#fff', borderTop: '0.5px solid #d3d1c7', flexShrink: 0 }}>
+                {error && (
+                  <div style={{ marginBottom: '0.75rem', background: '#fcebeb', border: '0.5px solid #f09595', borderRadius: '8px', padding: '8px 12px', fontSize: '12px', color: '#a32d2d' }}>
+                    {error}
+                  </div>
+                )}
                 <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-end' }}>
                   <div style={{ flex: 1, border: '0.5px solid #b4b2a9', borderRadius: '12px', overflow: 'hidden', background: '#fff' }}>
                     <textarea

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { supabase } from './supabaseClient'
+import { supabase, isSupabaseConfigured, supabaseEnvError } from './supabaseClient'
 import Login from './Login'
 import Layout from './Layout'
 import Dashboard from './pages/Dashboard'
@@ -11,28 +11,62 @@ import Timesheets from './pages/Timesheets'
 import Messages from './pages/Messages'
 import Invoices from './pages/Invoices'
 import Settings from './pages/Settings'
+import { canManageInvoices, canManageSettings, INITIAL_USER_SEEDS, isAdminRole, isAttorneyRole, normalizeRole } from './lib/roles'
+import { useChatNotifications } from './hooks/useChatNotifications'
 
 function App() {
   const [session, setSession] = useState(null)
   const [staff, setStaff] = useState(null)
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(isSupabaseConfigured)
   const [currentPage, setCurrentPage] = useState('dashboard')
+  const [authError, setAuthError] = useState('')
 
-  // ✅ Helper — true if user can act as attorney
-  const isAttorney = staff?.role === 'attorney' || staff?.is_attorney === true
+  const isAttorney = isAttorneyRole(staff?.role) || staff?.is_attorney === true
+  const isAdmin = isAdminRole(staff?.role)
+  const notifications = useChatNotifications(staff, currentPage)
 
   async function fetchStaff(userId) {
     const { data, error } = await supabase
       .from('staff')
       .select('*')
       .eq('id', userId)
-      .single()
+      .maybeSingle()
 
-    setStaff(error ? null : data)
+    if (error) {
+      setAuthError(error.message)
+      setStaff(null)
+      setLoading(false)
+      return
+    }
+
+    if (!data) {
+      const email = session?.user?.email || ''
+      const seededUser = INITIAL_USER_SEEDS.find((item) => item.email === email)
+
+      setStaff(
+        seededUser
+          ? {
+              id: userId,
+              email,
+              full_name: seededUser.name,
+              initials: seededUser.name.slice(0, 2).toUpperCase(),
+              role: seededUser.role,
+              active: true,
+            }
+          : null
+      )
+      setLoading(false)
+      return
+    }
+
+    setAuthError('')
+    setStaff({ ...data, role: normalizeRole(data.role, data.is_attorney ? 'attorney' : 'attorney') })
     setLoading(false)
   }
 
   useEffect(() => {
+    if (!isSupabaseConfigured) return undefined
+
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session)
       if (session) fetchStaff(session.user.id)
@@ -56,6 +90,20 @@ function App() {
     return () => subscription.unsubscribe()
   }, [])
 
+  if (!isSupabaseConfigured) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2rem', background: '#f1efe8', fontFamily: 'sans-serif' }}>
+        <div style={{ width: '100%', maxWidth: '560px', background: '#fff', borderRadius: '12px', border: '0.5px solid #d3d1c7', padding: '1.75rem' }}>
+          <div style={{ fontSize: '18px', fontWeight: '500', color: '#2c2c2a', marginBottom: '0.5rem' }}>Supabase configuration required</div>
+          <div style={{ fontSize: '13px', color: '#5f5e5a', lineHeight: '1.6' }}>{supabaseEnvError}</div>
+          <div style={{ marginTop: '1rem', fontSize: '12px', color: '#888780', lineHeight: '1.6' }}>
+            Expected environment variables: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   if (loading) {
     return (
       <div style={{
@@ -73,6 +121,23 @@ function App() {
 
   if (!session) return <Login />
 
+  if (!staff) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2rem', background: '#f1efe8', fontFamily: 'sans-serif' }}>
+        <div style={{ width: '100%', maxWidth: '560px', background: '#fff', borderRadius: '12px', border: '0.5px solid #d3d1c7', padding: '1.75rem' }}>
+          <div style={{ fontSize: '18px', fontWeight: '500', color: '#2c2c2a', marginBottom: '0.5rem' }}>No staff profile found</div>
+          <div style={{ fontSize: '13px', color: '#5f5e5a', lineHeight: '1.6' }}>
+            Sign-in succeeded, but this user does not have a matching `staff` row yet.
+          </div>
+          {authError && <div style={{ marginTop: '0.75rem', fontSize: '12px', color: '#a32d2d' }}>{authError}</div>}
+          <div style={{ marginTop: '1rem', fontSize: '12px', color: '#888780', lineHeight: '1.6' }}>
+            Seed the initial users in Supabase, then sign in again.
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   function renderPage() {
     switch (currentPage) {
       case 'dashboard':
@@ -82,7 +147,7 @@ function App() {
         return <Cases staff={staff} isAttorney={isAttorney} />
 
       case 'caselist':
-        return staff?.role === 'admin' ? <CaseList /> : null
+        return isAdmin ? <CaseList /> : null
 
       case 'clients':
         return <Clients staff={staff} />
@@ -97,10 +162,10 @@ function App() {
         return <Messages staff={staff} />
 
       case 'invoices':
-        return staff?.role === 'admin' ? <Invoices staff={staff} /> : null
+        return canManageInvoices(staff?.role) ? <Invoices staff={staff} /> : null
 
       case 'settings':
-        return staff?.role === 'admin' ? <Settings staff={staff} /> : null
+        return canManageSettings(staff?.role) ? <Settings staff={staff} /> : null
 
       default:
         return (
@@ -126,6 +191,10 @@ function App() {
       staff={staff}
       currentPage={currentPage}
       setCurrentPage={setCurrentPage}
+      notifications={notifications.notifications}
+      unreadNotifications={notifications.unreadCount}
+      onOpenNotifications={notifications.markAllRead}
+      onDismissNotification={notifications.dismissNotification}
     >
       {renderPage()}
     </Layout>

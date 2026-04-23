@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../supabaseClient'
+import { matchesSearch } from '../lib/search'
+import { normalizeSbNumber } from '../lib/sb'
 
 export default function NewCaseForm({ onClose, onCreated }) {
   const [associations, setAssociations] = useState([])
@@ -12,6 +14,7 @@ export default function NewCaseForm({ onClose, onCreated }) {
   const [error, setError] = useState('')
 
   const [form, setForm] = useState({
+    sb_number: '',
     case_category: '',
     association_id: '',
     association_case_number: '',
@@ -65,10 +68,10 @@ export default function NewCaseForm({ onClose, onCreated }) {
         .select('*')
         .or(`first_name.ilike.%${clientSearch}%,last_name.ilike.%${clientSearch}%,email.ilike.%${clientSearch}%`)
         .eq('active', true)
-        .limit(6)
+        .limit(25)
 
       if (cancelled) return
-      setClientResults(data || [])
+      setClientResults((data || []).filter(client => matchesSearch([client.first_name, client.last_name, client.email, client.sb_number], clientSearch)).slice(0, 6))
       setSearching(false)
     }, 300)
 
@@ -105,6 +108,7 @@ export default function NewCaseForm({ onClose, onCreated }) {
 
     // Create the case
     const caseData = {
+      sb_number: normalizeSbNumber(form.sb_number) || null,
       client_id: selectedClient.id,
       case_category: form.case_category,
       billing_type: form.billing_type,
@@ -183,9 +187,9 @@ export default function NewCaseForm({ onClose, onCreated }) {
 
         {/* Header */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.25rem' }}>
-          <div>
-            <div style={{ fontSize: '16px', fontWeight: '500', color: '#2c2c2a' }}>New case</div>
-            <div style={{ fontSize: '12px', color: '#888780', marginTop: '2px' }}>SB number will be assigned automatically</div>
+            <div>
+              <div style={{ fontSize: '16px', fontWeight: '500', color: '#2c2c2a' }}>New case</div>
+            <div style={{ fontSize: '12px', color: '#888780', marginTop: '2px' }}>SB No. is now editable and used as the primary matter identifier</div>
           </div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: '20px', color: '#888780', cursor: 'pointer', lineHeight: 1 }}>✕</button>
         </div>
@@ -243,6 +247,10 @@ export default function NewCaseForm({ onClose, onCreated }) {
 
           {/* CASE CATEGORY */}
           <div style={sectionLabel}>Case type</div>
+          <div style={fieldStyle}>
+            <label style={labelStyle}>SB No.</label>
+            <input type="text" value={form.sb_number} onChange={e => setField('sb_number', e.target.value)} placeholder="e.g. SB 26-0142" style={inputStyle} />
+          </div>
           <div style={{ ...fieldStyle, ...gridStyle }}>
             {['association', 'private'].map(cat => (
               <div key={cat}

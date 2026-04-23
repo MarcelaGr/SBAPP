@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../supabaseClient'
+import { getCaseSearchValues, matchesSearch } from '../lib/search'
 
 export default function CaseList() {
   const [cases, setCases] = useState([])
@@ -47,9 +48,7 @@ export default function CaseList() {
   const years = [...new Set(cases.map(c => c.sb_number?.slice(3, 5)).filter(Boolean))].sort().reverse()
 
   const filtered = cases.filter(c => {
-    const q = search.toLowerCase()
-    const clientName = `${c.clients?.first_name} ${c.clients?.last_name}`.toLowerCase()
-    const matchQ = !q || c.sb_number?.toLowerCase().includes(q) || clientName.includes(q) || c.brief_description?.toLowerCase().includes(q) || c.associations?.short_name?.toLowerCase().includes(q)
+    const matchQ = matchesSearch(getCaseSearchValues(c), search)
     const matchAssoc = assocFilter === 'all' || (assocFilter === 'private' ? c.case_category === 'private' : c.associations?.short_name === assocFilter)
     const matchStatus = statusFilter === 'all' || c.status === statusFilter
     const matchYear = yearFilter === 'all' || c.sb_number?.startsWith('SB ' + yearFilter)

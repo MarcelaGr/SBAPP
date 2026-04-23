@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../supabaseClient'
+import { getTimeslipSearchValues, matchesSearch } from '../lib/search'
 
 // ─── NEW / EDIT TIMESLIP FORM ─────────────────────────────────
 function TimeslipForm({ staff, editEntry, onClose, onSaved }) {
@@ -38,12 +39,12 @@ function TimeslipForm({ staff, editEntry, onClose, onSaved }) {
       .from('cases')
       .select('id, sb_number, brief_description, clients(first_name, last_name), associations(short_name), case_category, case_type, association_id, private_hourly_rate')
       .or(`sb_number.ilike.%${q}%,brief_description.ilike.%${q}%`)
-      .limit(6)
+      .limit(25)
     if (staff?.role === 'attorney') {
       query = query.eq('case_attorneys.attorney_id', staff.id)
     }
     const { data } = await query
-    setCaseResults(data || [])
+    setCaseResults((data || []).filter(item => matchesSearch([item.sb_number, item.brief_description, item.clients?.first_name, item.clients?.last_name], q)).slice(0, 6))
   }
 
   function setField(key, value) { setForm(prev => ({ ...prev, [key]: value })) }
@@ -299,9 +300,7 @@ export default function Timesheets({ staff }) {
   }
 
   const filtered = entries.filter(e => {
-    const q = search.toLowerCase()
-    const clientName = `${e.cases?.clients?.first_name} ${e.cases?.clients?.last_name}`.toLowerCase()
-    const matchQ = !q || e.cases?.sb_number?.toLowerCase().includes(q) || clientName.includes(q) || e.description?.toLowerCase().includes(q) || e.staff?.full_name?.toLowerCase().includes(q)
+    const matchQ = matchesSearch(getTimeslipSearchValues(e), search)
     const matchStatus = statusFilter === 'all' || e.status === statusFilter
     const matchAtty = attyFilter === 'all' || e.attorney_id === attyFilter
     return matchQ && matchStatus && matchAtty

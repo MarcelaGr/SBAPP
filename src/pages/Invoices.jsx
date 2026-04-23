@@ -1,12 +1,17 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import logoImage from '../assets/logo.png'
 import { supabase } from '../supabaseClient'
+import { matchesSearch } from '../lib/search'
+import { normalizeSbNumber } from '../lib/sb'
 
 export default function Invoices({ staff }) {
   const [invoiceRuns, setInvoiceRuns] = useState([])
   const [invoices, setInvoices] = useState([])
   const [associations, setAssociations] = useState([])
+  const [cases, setCases] = useState([])
   const [loading, setLoading] = useState(true)
   const [generating, setGenerating] = useState(false)
+  const [creatingInvoice, setCreatingInvoice] = useState(false)
   const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1)
   const [selectedYear, setSelectedYear] = useState(new Date().getFullYear())
   const [assocFilter, setAssocFilter] = useState('all')
@@ -15,6 +20,12 @@ export default function Invoices({ staff }) {
   const [expandedRuns, setExpandedRuns] = useState({})
   const [selected, setSelected] = useState([])
   const [previewInvoice, setPreviewInvoice] = useState(null)
+  const [showCreateForm, setShowCreateForm] = useState(false)
+  const [createError, setCreateError] = useState('')
+  const [pageError, setPageError] = useState('')
+  const [invoiceSearch, setInvoiceSearch] = useState('')
+  const [savingSbNumber, setSavingSbNumber] = useState(false)
+  const [createForm, setCreateForm] = useState(getDefaultCreateForm())
   const [firmInfo] = useState({
     name: 'Stone Busailah LLP',
     address: '100 N. Garfield Ave., Suite N210',
@@ -26,103 +37,234 @@ export default function Invoices({ staff }) {
 
   useEffect(() => {
     fetchAssociations()
+    fetchCases()
     fetchInvoices()
   }, [selectedMonth, selectedYear])
 
+  useEffect(() => {
+    const channel = supabase
+      .channel(`invoices:${selectedMonth}:${selectedYear}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'invoices' }, () => {
+        fetchInvoices()
+      })
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [selectedMonth, selectedYear])
+
+  function getDefaultCreateForm() {
+    const startDate = new Date(selectedYear, selectedMonth - 1, 1).toISOString().split('T')[0]
+    const endDate = new Date(selectedYear, selectedMonth, 0).toISOString().split('T')[0]
+    const dueDate = new Date(selectedYear, selectedMonth, 15).toISOString().split('T')[0]
+    const invoiceDate = new Date().toISOString().split('T')[0]
+
+    return {
+      targetType: 'case',
+      caseId: '',
+      caseQuery: '',
+      associationId: '',
+      invoiceNumber: '',
+      invoiceDate,
+      startDate,
+      endDate,
+      dueDate,
+    }
+  }
+
   async function fetchAssociations() {
-    const { data } = await supabase.from('associations').select('*').eq('active', true).order('short_name')
+    const { data, error } = await supabase.from('associations').select('*').eq('active', true).order('short_name')
+    if (error) {
+      setPageError(error.message)
+      return
+    }
     setAssociations(data || [])
+  }
+
+  async function fetchCases() {
+    const { data, error } = await supabase
+      .from('cases')
+      .select(`
+        id, sb_number, brief_description, client_id, association_id, case_category, status,
+        clients(first_name, last_name),
+        associations(short_name, name)
+      `)
+      .order('sb_number', { ascending: true })
+
+    if (error) {
+      setPageError(error.message)
+      return
+    }
+
+    setCases(data || [])
   }
 
   async function fetchInvoices() {
     setLoading(true)
-    const { data } = await supabase
-      .from('invoices')
-      .select(`
-        *,
-        cases(sb_number, brief_description, association_case_number,
-          clients(first_name, last_name),
-          case_attorneys(is_lead, staff(full_name, initials))
-        ),
-        associations(id, short_name, name, billing_contact_name, billing_contact_email, address_street, address_city_state_zip),
-        invoice_runs(id, period_month, period_year, association_id, associations(short_name, name))
-      `)
-      .eq('period_month', selectedMonth)
-      .eq('period_year', selectedYear)
-      .order('invoice_number', { ascending: true })
+    setPageError('')
 
-    setInvoices(data || [])
+    try {
+      const { data, error } = await supabase
+        .from('invoices')
+        .select(`
+          *,
+          cases(id, sb_number, brief_description, association_case_number,
+            clients(first_name, last_name),
+            case_attorneys(is_lead, staff(full_name, initials))
+          ),
+          associations(id, short_name, name, billing_contact_name, billing_contact_email, address_street, address_city_state_zip),
+          invoice_runs(id, period_month, period_year, association_id, associations(short_name, name))
+        `)
+        .eq('period_month', selectedMonth)
+        .eq('period_year', selectedYear)
+        .order('invoice_number', { ascending: true, nullsFirst: false })
 
-    const runsMap = {}
-    data?.forEach(inv => {
-      if (inv.invoice_runs?.id) runsMap[inv.invoice_runs.id] = inv.invoice_runs
-    })
-    const runs = Object.values(runsMap)
-    setInvoiceRuns(runs)
-    const expanded = {}
-    runs.forEach(r => { expanded[r.id] = true })
-    setExpandedRuns(expanded)
-    setLoading(false)
+      if (error) throw error
+
+      setInvoices(data || [])
+
+      const runsMap = {}
+      data?.forEach(inv => {
+        if (inv.invoice_runs?.id) runsMap[inv.invoice_runs.id] = inv.invoice_runs
+      })
+      const runs = Object.values(runsMap)
+      setInvoiceRuns(runs)
+      const expanded = {}
+      runs.forEach(r => { expanded[r.id] = true })
+      setExpandedRuns(expanded)
+    } catch (error) {
+      console.error('Failed to load invoices:', error)
+      setPageError(error.message || 'Could not load invoices.')
+      setInvoices([])
+      setInvoiceRuns([])
+      setExpandedRuns({})
+    } finally {
+      setLoading(false)
+    }
   }
 
   async function generateRun() {
     setGenerating(true)
-    const { data: cases } = await supabase
-      .from('cases')
-      .select(`*, clients(first_name, last_name), associations(id, short_name, name), time_entries(id, hours, computed_amount, status)`)
-      .eq('status', 'active')
 
-    if (!cases || cases.length === 0) { alert('No active cases found.'); setGenerating(false); return }
+    try {
+      const { data: cases, error: casesError } = await supabase
+        .from('cases')
+        .select(`*, clients(first_name, last_name), associations(id, short_name, name), time_entries(id, hours, computed_amount, status)`)
+        .eq('status', 'active')
 
-    const byAssoc = {}
-    cases.forEach(c => {
-      const key = c.case_category === 'private' ? '__private__' : (c.association_id || '__private__')
-      if (!byAssoc[key]) byAssoc[key] = []
-      byAssoc[key].push(c)
-    })
+      if (casesError) throw casesError
+      if (!cases || cases.length === 0) {
+        alert('No active cases found.')
+        return
+      }
 
-    for (const [assocKey, assocCases] of Object.entries(byAssoc)) {
-      const isPrivate = assocKey === '__private__'
-      const assocId = isPrivate ? null : assocKey
+      const byAssoc = {}
+      cases.forEach(c => {
+        const key = c.case_category === 'private' ? '__private__' : (c.association_id || '__private__')
+        if (!byAssoc[key]) byAssoc[key] = []
+        byAssoc[key].push(c)
+      })
 
-      const { data: run, error: runError } = await supabase
-        .from('invoice_runs')
-        .upsert({ period_month: selectedMonth, period_year: selectedYear, association_id: assocId, generated_by: staff?.id }, { onConflict: 'period_month,period_year,association_id' })
-        .select().single()
+      let createdCount = 0
 
-      if (runError || !run) continue
+      for (const [assocKey, assocCases] of Object.entries(byAssoc)) {
+        const isPrivate = assocKey === '__private__'
+        const assocId = isPrivate ? null : assocKey
 
-      for (const c of assocCases) {
-        const approvedEntries = (c.time_entries || []).filter(e => e.status === 'approved')
-        const subtotal = approvedEntries.reduce((s, e) => s + (e.computed_amount || 0), 0)
-        const { data: existingInv } = await supabase.from('invoices').select('id').eq('case_id', c.id).eq('period_month', selectedMonth).eq('period_year', selectedYear).eq('invoice_kind', 'case').single()
-        if (!existingInv) {
-          await supabase.from('invoices').insert({
-            invoice_run_id: run.id, case_id: c.id, client_id: c.client_id, association_id: assocId,
-            invoice_kind: 'case', period_month: selectedMonth, period_year: selectedYear,
-            subtotal, total_due: subtotal, status: 'draft',
-            issued_at: new Date().toISOString().split('T')[0],
-            due_at: new Date(selectedYear, selectedMonth, 15).toISOString().split('T')[0],
-          })
+        const existingRunQuery = supabase
+          .from('invoice_runs')
+          .select('id')
+          .eq('period_month', selectedMonth)
+          .eq('period_year', selectedYear)
+
+        const runLookup = assocId
+          ? existingRunQuery.eq('association_id', assocId)
+          : existingRunQuery.is('association_id', null)
+
+        const { data: existingRun, error: existingRunError } = await runLookup.maybeSingle()
+        if (existingRunError) throw existingRunError
+
+        let run = existingRun
+
+        if (!run) {
+          const { data: insertedRun, error: runInsertError } = await supabase
+            .from('invoice_runs')
+            .insert({
+              period_month: selectedMonth,
+              period_year: selectedYear,
+              association_id: assocId,
+              generated_by: staff?.id,
+            })
+            .select('id')
+            .single()
+
+          if (runInsertError) throw runInsertError
+          run = insertedRun
+        }
+
+        for (const c of assocCases) {
+          const approvedEntries = (c.time_entries || []).filter(e => e.status === 'approved')
+          const subtotal = approvedEntries.reduce((s, e) => s + (e.computed_amount || 0), 0)
+
+          const { data: existingInv, error: existingInvError } = await supabase
+            .from('invoices')
+            .select('id')
+            .eq('case_id', c.id)
+            .eq('period_month', selectedMonth)
+            .eq('period_year', selectedYear)
+            .eq('invoice_kind', 'case')
+            .maybeSingle()
+
+          if (existingInvError) throw existingInvError
+
+          if (!existingInv) {
+            const { error: insertInvoiceError } = await supabase.from('invoices').insert({
+              invoice_run_id: run.id, case_id: c.id, client_id: c.client_id, association_id: assocId,
+              invoice_kind: 'case', period_month: selectedMonth, period_year: selectedYear,
+              subtotal, total_due: subtotal, status: 'draft',
+              issued_at: new Date().toISOString().split('T')[0],
+              due_at: new Date(selectedYear, selectedMonth, 15).toISOString().split('T')[0],
+            })
+
+            if (insertInvoiceError) throw insertInvoiceError
+            createdCount += 1
+          }
+        }
+
+        if (!isPrivate) {
+          const { data: existingSummary, error: existingSummaryError } = await supabase
+            .from('invoices')
+            .select('id')
+            .eq('invoice_run_id', run.id)
+            .eq('invoice_kind', 'association_summary')
+            .maybeSingle()
+
+          if (existingSummaryError) throw existingSummaryError
+
+          if (!existingSummary) {
+            const totalSubtotal = assocCases.reduce((s, c) => s + (c.time_entries || []).filter(e => e.status === 'approved').reduce((ss, e) => ss + (e.computed_amount || 0), 0), 0)
+            const { error: insertSummaryError } = await supabase.from('invoices').insert({
+              invoice_run_id: run.id, case_id: assocCases[0].id, client_id: assocCases[0].client_id, association_id: assocId,
+              invoice_kind: 'association_summary', period_month: selectedMonth, period_year: selectedYear,
+              subtotal: totalSubtotal, total_due: totalSubtotal, status: 'draft',
+              issued_at: new Date().toISOString().split('T')[0],
+              due_at: new Date(selectedYear, selectedMonth, 15).toISOString().split('T')[0],
+            })
+
+            if (insertSummaryError) throw insertSummaryError
+          }
         }
       }
 
-      if (!isPrivate) {
-        const { data: existingSummary } = await supabase.from('invoices').select('id').eq('invoice_run_id', run.id).eq('invoice_kind', 'association_summary').single()
-        if (!existingSummary) {
-          const totalSubtotal = assocCases.reduce((s, c) => s + (c.time_entries || []).filter(e => e.status === 'approved').reduce((ss, e) => ss + (e.computed_amount || 0), 0), 0)
-          await supabase.from('invoices').insert({
-            invoice_run_id: run.id, case_id: assocCases[0].id, client_id: assocCases[0].client_id, association_id: assocId,
-            invoice_kind: 'association_summary', period_month: selectedMonth, period_year: selectedYear,
-            subtotal: totalSubtotal, total_due: totalSubtotal, status: 'draft',
-            issued_at: new Date().toISOString().split('T')[0],
-            due_at: new Date(selectedYear, selectedMonth, 15).toISOString().split('T')[0],
-          })
-        }
-      }
+      await fetchInvoices()
+      alert(createdCount > 0 ? `Created ${createdCount} invoice${createdCount === 1 ? '' : 's'}.` : 'Invoice run is already up to date for this period.')
+    } catch (error) {
+      console.error('Failed to generate invoice run:', error)
+      alert(`Could not generate invoices: ${error.message || 'Unknown error'}`)
+    } finally {
+      setGenerating(false)
     }
-    setGenerating(false)
-    fetchInvoices()
   }
 
   async function updateInvoiceStatus(id, status) {
@@ -143,13 +285,227 @@ export default function Invoices({ staff }) {
     else setSelected(prev => [...new Set([...prev, ...ids])])
   }
 
+  function setCreateField(key, value) {
+    setCreateForm(prev => ({ ...prev, [key]: value }))
+  }
+
+  function openCreateForm() {
+    setCreateError('')
+    setCreateForm(getDefaultCreateForm())
+    setShowCreateForm(true)
+  }
+
+  async function ensureInvoiceRun(periodMonth, periodYear, associationId) {
+    const existingRunQuery = supabase
+      .from('invoice_runs')
+      .select('id')
+      .eq('period_month', periodMonth)
+      .eq('period_year', periodYear)
+
+    const runLookup = associationId
+      ? existingRunQuery.eq('association_id', associationId)
+      : existingRunQuery.is('association_id', null)
+
+    const { data: existingRun, error: existingRunError } = await runLookup.maybeSingle()
+    if (existingRunError) throw existingRunError
+    if (existingRun) return existingRun
+
+    const { data: insertedRun, error: runInsertError } = await supabase
+      .from('invoice_runs')
+      .insert({
+        period_month: periodMonth,
+        period_year: periodYear,
+        association_id: associationId,
+        generated_by: staff?.id,
+      })
+      .select('id')
+      .single()
+
+    if (runInsertError) throw runInsertError
+    return insertedRun
+  }
+
+  function sumApprovedEntriesInRange(entries, startDate, endDate) {
+    return (entries || [])
+      .filter(entry => entry.status === 'approved' && entry.entry_date >= startDate && entry.entry_date <= endDate)
+      .reduce((sum, entry) => sum + (entry.computed_amount || 0), 0)
+  }
+
+  async function handleCreateInvoice(e) {
+    e.preventDefault()
+    setCreateError('')
+
+    if (!createForm.startDate || !createForm.endDate) {
+      setCreateError('Please choose a start date and end date.')
+      return
+    }
+    if (createForm.startDate > createForm.endDate) {
+      setCreateError('The start date must be before the end date.')
+      return
+    }
+    if (createForm.targetType === 'case' && !createForm.caseId) {
+      setCreateError('Please select a case.')
+      return
+    }
+    if (createForm.targetType === 'association' && !createForm.associationId) {
+      setCreateError('Please select an association.')
+      return
+    }
+
+    setCreatingInvoice(true)
+
+    try {
+      const periodDate = new Date(`${createForm.endDate}T00:00:00`)
+      const periodMonth = periodDate.getMonth() + 1
+      const periodYear = periodDate.getFullYear()
+
+      if (createForm.targetType === 'case') {
+        const { data: selectedCase, error: caseError } = await supabase
+          .from('cases')
+          .select(`
+            id, sb_number, client_id, association_id, case_category,
+            time_entries(entry_date, computed_amount, status)
+          `)
+          .eq('id', createForm.caseId)
+          .single()
+
+        if (caseError) throw caseError
+
+        const associationId = selectedCase.case_category === 'private' ? null : (selectedCase.association_id || null)
+        const run = await ensureInvoiceRun(periodMonth, periodYear, associationId)
+
+        const selectedCaseSb = normalizeSbNumber(selectedCase.sb_number)
+
+        const { data: existingInvoice, error: existingInvoiceError } = await supabase
+          .from('invoices')
+          .select('id, case_id')
+          .eq('period_month', periodMonth)
+          .eq('period_year', periodYear)
+          .eq('invoice_kind', 'case')
+          .in('case_id', [selectedCase.id])
+          .maybeSingle()
+
+        if (existingInvoiceError) throw existingInvoiceError
+        if (existingInvoice) {
+          setCreateError('An invoice for that case already exists for the selected billing period.')
+          setCreatingInvoice(false)
+          return
+        }
+
+        if (selectedCaseSb) {
+          const { data: duplicateBySb } = await supabase
+            .from('invoices')
+            .select('id, cases!inner(sb_number)')
+            .eq('period_month', periodMonth)
+            .eq('period_year', periodYear)
+            .eq('invoice_kind', 'case')
+            .eq('cases.sb_number', selectedCaseSb)
+            .maybeSingle()
+
+          if (duplicateBySb) {
+            setCreateError('An invoice for that SB number already exists for the selected billing period.')
+            setCreatingInvoice(false)
+            return
+          }
+        }
+
+        const subtotal = sumApprovedEntriesInRange(selectedCase.time_entries, createForm.startDate, createForm.endDate)
+
+        const { error: insertError } = await supabase.from('invoices').insert({
+          invoice_run_id: run.id,
+          case_id: selectedCase.id,
+          client_id: selectedCase.client_id,
+          association_id: associationId,
+          invoice_number: createForm.invoiceNumber.trim() || null,
+          invoice_kind: 'case',
+          period_month: periodMonth,
+          period_year: periodYear,
+          subtotal,
+          total_due: subtotal,
+          status: 'draft',
+          issued_at: createForm.invoiceDate,
+          due_at: createForm.dueDate,
+        })
+
+        if (insertError) throw insertError
+      } else {
+        const { data: associationCases, error: associationCasesError } = await supabase
+          .from('cases')
+          .select('id, client_id, time_entries(entry_date, computed_amount, status)')
+          .eq('association_id', createForm.associationId)
+          .eq('case_category', 'association')
+
+        if (associationCasesError) throw associationCasesError
+        if (!associationCases || associationCases.length === 0) {
+          setCreateError('No association cases were found for that association.')
+          setCreatingInvoice(false)
+          return
+        }
+
+        const run = await ensureInvoiceRun(periodMonth, periodYear, createForm.associationId)
+
+        const { data: existingSummary, error: existingSummaryError } = await supabase
+          .from('invoices')
+          .select('id')
+          .eq('invoice_run_id', run.id)
+          .eq('invoice_kind', 'association_summary')
+          .maybeSingle()
+
+        if (existingSummaryError) throw existingSummaryError
+        if (existingSummary) {
+          setCreateError('An association invoice already exists for the selected billing period.')
+          setCreatingInvoice(false)
+          return
+        }
+
+        const subtotal = associationCases.reduce(
+          (sum, currentCase) => sum + sumApprovedEntriesInRange(currentCase.time_entries, createForm.startDate, createForm.endDate),
+          0
+        )
+
+        const { error: insertError } = await supabase.from('invoices').insert({
+          invoice_run_id: run.id,
+          case_id: associationCases[0].id,
+          client_id: associationCases[0].client_id,
+          association_id: createForm.associationId,
+          invoice_number: createForm.invoiceNumber.trim() || null,
+          invoice_kind: 'association_summary',
+          period_month: periodMonth,
+          period_year: periodYear,
+          subtotal,
+          total_due: subtotal,
+          status: 'draft',
+          issued_at: createForm.invoiceDate,
+          due_at: createForm.dueDate,
+        })
+
+        if (insertError) throw insertError
+      }
+
+      setShowCreateForm(false)
+      await fetchInvoices()
+      alert('Invoice created.')
+    } catch (error) {
+      console.error('Failed to create invoice:', error)
+      setCreateError(error.message || 'Could not create invoice.')
+    } finally {
+      setCreatingInvoice(false)
+    }
+  }
+
   function printInvoice(inv) {
     const monthName = new Date(selectedYear, selectedMonth - 1).toLocaleString('en-US', { month: 'long' })
     const win = window.open('', '_blank')
+    if (!win) {
+      alert('Your browser blocked the invoice print window. Please allow pop-ups for this site and try again.')
+      return
+    }
     win.document.write(`<!DOCTYPE html><html><head><title>${inv.invoice_number} — Stone Busailah LLP</title>
     <style>
       body{font-family:Arial,sans-serif;font-size:12px;margin:2cm;color:#222}
       .header{display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:1rem;border-bottom:3px solid #0C447C;margin-bottom:1.5rem}
+      .brand{max-width:320px}
+      .brand-logo{display:block;width:140px;max-width:100%;height:auto;margin:0 0 10px 0}
       .firm-name{font-size:20px;font-weight:bold;color:#0C447C}
       .firm-sub{font-size:11px;color:#666;margin-top:4px;line-height:1.6}
       .inv-meta{text-align:right;font-size:12px;color:#444;line-height:1.8}
@@ -167,7 +523,7 @@ export default function Invoices({ staff }) {
       .footer{margin-top:2rem;padding-top:1rem;border-top:.5px solid #ccc;font-size:10px;color:#888;text-align:center}
     </style></head><body>
     <div class="header">
-      <div><div class="firm-name">${firmInfo.name}</div><div class="firm-sub">${firmInfo.address}<br>${firmInfo.city}<br>Tel: ${firmInfo.phone} · ${firmInfo.website}</div></div>
+      <div class="brand">${logoImage ? `<img src="${logoImage}" alt="Stone Busailah LLP" class="brand-logo" />` : ''}<div class="firm-name">${firmInfo.name}</div><div class="firm-sub">${firmInfo.address}<br>${firmInfo.city}<br>Tel: ${firmInfo.phone} · ${firmInfo.website}</div></div>
       <div class="inv-meta"><div class="inv-no">${inv.invoice_number}</div><div>Date: ${inv.issued_at || new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'})}</div><div>Period: ${monthName} ${selectedYear}</div><div>Due: ${inv.due_at||''}</div></div>
     </div>
     <div class="parties">
@@ -191,13 +547,69 @@ export default function Invoices({ staff }) {
 
   function printBulk(ids) { invoices.filter(inv => ids.includes(inv.id)).forEach(inv => printInvoice(inv)) }
 
+  async function updateInvoiceSbNumber(invoice, nextSbNumber) {
+    const normalized = normalizeSbNumber(nextSbNumber)
+    if (!invoice?.cases?.id || !normalized) return
+
+    setSavingSbNumber(true)
+    const { error } = await supabase.from('cases').update({ sb_number: normalized }).eq('id', invoice.cases.id)
+
+    if (error) {
+      setPageError(error.message)
+      setSavingSbNumber(false)
+      return
+    }
+
+    setInvoices(prev =>
+      prev.map(item =>
+        item.cases?.id === invoice.cases.id
+          ? { ...item, cases: { ...item.cases, sb_number: normalized } }
+          : item
+      )
+    )
+    setCases(prev => prev.map(item => item.id === invoice.cases.id ? { ...item, sb_number: normalized } : item))
+    setPreviewInvoice(prev => prev?.id === invoice.id ? { ...prev, cases: { ...prev.cases, sb_number: normalized } } : prev)
+    setSavingSbNumber(false)
+  }
+
   const statusBadge = (status) => {
-    const styles = { draft: { background: '#f1efe8', color: '#5f5e5a' }, sent: { background: '#E6F1FB', color: '#0C447C' }, paid: { background: '#eaf3de', color: '#27500a' } }
-    return <span style={{ ...styles[status], padding: '2px 8px', borderRadius: '20px', fontSize: '11px', fontWeight: '500' }}>{status?.charAt(0).toUpperCase() + status?.slice(1)}</span>
+    const styles = {
+      draft: { background: '#F1EFE8', color: '#6b6a65', border: '1px solid #d3d1c7', dot: '#a8a5a0' },
+      sent:  { background: '#E6F1FB', color: '#0C447C', border: '1px solid #B5D4F4', dot: '#378ADD' },
+      paid:  { background: '#EAF3DE', color: '#27500a', border: '1px solid #b3d98a', dot: '#4CAF50' },
+    }
+    const s = styles[status] || styles.draft
+    return (
+      <span style={{ ...s, padding: '3px 9px', borderRadius: '20px', fontSize: '11px', fontWeight: '600', display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
+        <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: s.dot, flexShrink: 0 }} />
+        {status?.charAt(0).toUpperCase() + status?.slice(1)}
+      </span>
+    )
   }
 
   const months = ['January','February','March','April','May','June','July','August','September','October','November','December']
   const years = [2024, 2025, 2026, 2027]
+
+  const filteredInvoices = useMemo(() => {
+    return invoices.filter((invoice) => {
+      const matchesAssoc = assocFilter === 'all' || invoice.associations?.short_name === assocFilter || (assocFilter === 'private' && !invoice.association_id)
+      const matchesStatus = statusFilter === 'all' || invoice.status === statusFilter
+      const matchesText = matchesSearch(
+        [
+          invoice.invoice_number,
+          invoice.cases?.sb_number,
+          invoice.cases?.clients?.first_name,
+          invoice.cases?.clients?.last_name,
+          invoice.cases?.brief_description,
+          invoice.associations?.short_name,
+          invoice.associations?.name,
+        ],
+        invoiceSearch
+      )
+
+      return matchesAssoc && matchesStatus && matchesText
+    })
+  }, [assocFilter, invoiceSearch, invoices, statusFilter])
 
   // Grouped by run for association view
   const filteredRuns = invoiceRuns.filter(run => {
@@ -207,88 +619,115 @@ export default function Invoices({ staff }) {
   })
 
   // Flat list for case view
-  const caseInvoices = invoices
+  const caseInvoices = filteredInvoices
     .filter(inv => inv.invoice_kind === 'case')
     .filter(inv => statusFilter === 'all' || inv.status === statusFilter)
     .filter(inv => assocFilter === 'all' || inv.associations?.short_name === assocFilter || (assocFilter === 'private' && !inv.association_id))
 
-  const totalInvoiced = invoices.filter(i => i.invoice_kind === 'case').reduce((s, i) => s + (i.total_due || 0), 0)
-  const totalPaid = invoices.filter(i => i.invoice_kind === 'case' && i.status === 'paid').reduce((s, i) => s + (i.total_due || 0), 0)
+  const totalInvoiced = filteredInvoices.filter(i => i.invoice_kind === 'case').reduce((s, i) => s + (i.total_due || 0), 0)
+  const totalPaid = filteredInvoices.filter(i => i.invoice_kind === 'case' && i.status === 'paid').reduce((s, i) => s + (i.total_due || 0), 0)
 
   return (
-    <div style={{ padding: '1.25rem', fontFamily: 'sans-serif' }}>
+    <div style={{ padding: '1.75rem 2rem', fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", maxWidth: '1400px' }}>
 
       {/* Page header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem', flexWrap: 'wrap', gap: '8px' }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '1.5rem', flexWrap: 'wrap', gap: '12px' }}>
         <div>
-          <div style={{ fontSize: '15px', fontWeight: '500', color: '#2c2c2a' }}>Invoices</div>
-          <div style={{ fontSize: '12px', color: '#888780', marginTop: '2px' }}>Admin view — monthly billing runs</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '4px' }}>
+            <div style={{ width: '32px', height: '32px', borderRadius: '8px', background: 'linear-gradient(135deg, #0C447C 0%, #185FA5 100%)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#fff" strokeWidth="1.5">
+                <rect x="2" y="2" width="12" height="12" rx="1.5"/><path d="M5 8h6M5 5h6M5 11h4"/>
+              </svg>
+            </div>
+            <div style={{ fontSize: '20px', fontWeight: '600', color: '#1a1a18', letterSpacing: '-0.3px' }}>Invoices</div>
+          </div>
+          <div style={{ fontSize: '13px', color: '#888780', marginLeft: '42px' }}>Admin view — monthly billing runs</div>
         </div>
-        <button onClick={generateRun} disabled={generating}
-          style={{ padding: '6px 16px', background: generating ? '#888' : '#0C447C', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '12px', fontWeight: '500', cursor: generating ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: '6px' }}>
-          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M8 3v10M3 8h10"/></svg>
-          {generating ? 'Generating...' : 'Generate invoice run'}
-        </button>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+          <button onClick={generateRun} disabled={generating}
+            style={{ padding: '8px 16px', background: '#fff', color: '#0C447C', border: '1px solid #B5D4F4', borderRadius: '10px', fontSize: '13px', fontWeight: '500', cursor: generating ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: '6px', transition: 'all 0.15s', boxShadow: '0 1px 3px rgba(0,0,0,0.06)' }}
+            onMouseEnter={e => { if (!generating) { e.currentTarget.style.background = '#E6F1FB'; e.currentTarget.style.borderColor = '#0C447C' } }}
+            onMouseLeave={e => { e.currentTarget.style.background = '#fff'; e.currentTarget.style.borderColor = '#B5D4F4' }}>
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M8 3v4l3 1.5"/><circle cx="8" cy="8" r="6"/></svg>
+            {generating ? 'Generating…' : 'Generate run'}
+          </button>
+          <button onClick={openCreateForm}
+            style={{ padding: '8px 18px', background: 'linear-gradient(135deg, #0C447C 0%, #185FA5 100%)', color: '#fff', border: 'none', borderRadius: '10px', fontSize: '13px', fontWeight: '600', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '7px', boxShadow: '0 2px 8px rgba(12,68,124,0.28)', transition: 'box-shadow 0.15s' }}
+            onMouseEnter={e => e.currentTarget.style.boxShadow = '0 4px 16px rgba(12,68,124,0.38)'}
+            onMouseLeave={e => e.currentTarget.style.boxShadow = '0 2px 8px rgba(12,68,124,0.28)'}>
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.2"><path d="M8 3v10M3 8h10"/></svg>
+            New invoice
+          </button>
+        </div>
       </div>
 
       {/* Stats */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0,1fr))', gap: '10px', marginBottom: '1rem' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0,1fr))', gap: '12px', marginBottom: '1.5rem' }}>
         {[
-          { label: `Invoiced (${months[selectedMonth-1]} ${selectedYear})`, value: `$${totalInvoiced.toFixed(2)}` },
-          { label: 'Outstanding', value: `$${(totalInvoiced - totalPaid).toFixed(2)}` },
-          { label: 'Paid', value: `$${totalPaid.toFixed(2)}` },
-          { label: 'Total invoices', value: invoices.filter(i => i.invoice_kind === 'case').length },
+          { label: `Invoiced`, sub: `${months[selectedMonth-1]} ${selectedYear}`, value: `$${totalInvoiced.toFixed(2)}`, icon: '💰', accent: '#0C447C', bg: '#E6F1FB' },
+          { label: 'Outstanding', sub: 'Unpaid balance', value: `$${(totalInvoiced - totalPaid).toFixed(2)}`, icon: '⏳', accent: '#91540a', bg: '#FEF3E2' },
+          { label: 'Paid', sub: 'This period', value: `$${totalPaid.toFixed(2)}`, icon: '✅', accent: '#27500a', bg: '#EAF3DE' },
+          { label: 'Total invoices', sub: 'This month', value: invoices.filter(i => i.invoice_kind === 'case').length, icon: '🧾', accent: '#5f5e5a', bg: '#F1EFE8' },
         ].map(s => (
-          <div key={s.label} style={{ background: '#e8e6df', borderRadius: '8px', padding: '1rem' }}>
-            <div style={{ fontSize: '12px', color: '#5f5e5a', marginBottom: '6px' }}>{s.label}</div>
-            <div style={{ fontSize: '20px', fontWeight: '500', color: '#2c2c2a' }}>{s.value}</div>
+          <div key={s.label} style={{ background: '#fff', borderRadius: '12px', padding: '1.1rem 1.25rem', border: '1px solid #e8e6e0', boxShadow: '0 1px 4px rgba(0,0,0,0.05)', position: 'relative', overflow: 'hidden' }}>
+            <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: '3px', background: s.bg, borderRadius: '12px 12px 0 0' }} />
+            <div style={{ fontSize: '11px', fontWeight: '600', color: '#888780', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: '2px' }}>{s.label}</div>
+            <div style={{ fontSize: '11px', color: '#b4b2a9', marginBottom: '10px' }}>{s.sub}</div>
+            <div style={{ fontSize: '22px', fontWeight: '700', color: s.accent, letterSpacing: '-0.5px' }}>{s.value}</div>
           </div>
         ))}
       </div>
 
       {/* Filters bar */}
-      <div style={{ background: '#fff', border: '0.5px solid #d3d1c7', borderRadius: '12px', padding: '1rem 1.25rem', marginBottom: '1rem' }}>
+      <div style={{ background: '#fff', border: '1px solid #e8e6e0', borderRadius: '14px', padding: '1rem 1.25rem', marginBottom: '1.25rem', boxShadow: '0 1px 4px rgba(0,0,0,0.05)' }}>
         <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+          {/* Search */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: '#f8f7f5', border: '1px solid #e8e6e0', borderRadius: '10px', padding: '7px 12px', minWidth: '220px' }}>
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#aaa8a0" strokeWidth="1.5"><circle cx="7" cy="7" r="5"/><path d="M11 11l3 3"/></svg>
+            <input value={invoiceSearch} onChange={e => setInvoiceSearch(e.target.value)} placeholder="Search SB no., client, invoice…"
+              style={{ border: 'none', background: 'transparent', fontSize: '13px', outline: 'none', width: '190px', color: '#2c2c2a' }} />
+          </div>
 
           {/* Month / Year */}
           <select value={selectedMonth} onChange={e => setSelectedMonth(parseInt(e.target.value))}
-            style={{ fontSize: '13px', padding: '5px 10px', border: '0.5px solid #d3d1c7', borderRadius: '8px', background: '#fff', color: '#2c2c2a' }}>
+            style={{ fontSize: '13px', padding: '7px 10px', border: '1px solid #e8e6e0', borderRadius: '10px', background: '#fff', color: '#2c2c2a', cursor: 'pointer', outline: 'none' }}>
             {months.map((m, i) => <option key={i+1} value={i+1}>{m}</option>)}
           </select>
           <select value={selectedYear} onChange={e => setSelectedYear(parseInt(e.target.value))}
-            style={{ fontSize: '13px', padding: '5px 10px', border: '0.5px solid #d3d1c7', borderRadius: '8px', background: '#fff', color: '#2c2c2a' }}>
+            style={{ fontSize: '13px', padding: '7px 10px', border: '1px solid #e8e6e0', borderRadius: '10px', background: '#fff', color: '#2c2c2a', cursor: 'pointer', outline: 'none' }}>
             {years.map(y => <option key={y} value={y}>{y}</option>)}
           </select>
 
-          <div style={{ width: '1px', height: '24px', background: '#d3d1c7' }} />
+          <div style={{ width: '1px', height: '24px', background: '#e8e6e0' }} />
 
           {/* View mode toggle */}
-          <div style={{ display: 'flex', gap: '3px', background: '#f1efe8', borderRadius: '8px', padding: '3px' }}>
+          <div style={{ display: 'flex', gap: '2px', background: '#f1efe8', borderRadius: '10px', padding: '3px' }}>
             {[{ key: 'association', label: 'By association' }, { key: 'case', label: 'By case' }].map(v => (
               <button key={v.key} onClick={() => setViewMode(v.key)}
-                style={{ padding: '4px 14px', borderRadius: '6px', fontSize: '12px', fontWeight: '500', cursor: 'pointer', border: 'none', background: viewMode === v.key ? '#0C447C' : 'transparent', color: viewMode === v.key ? '#fff' : '#5f5e5a' }}>
+                style={{ padding: '5px 14px', borderRadius: '8px', fontSize: '12px', fontWeight: '500', cursor: 'pointer', border: 'none', background: viewMode === v.key ? '#0C447C' : 'transparent', color: viewMode === v.key ? '#fff' : '#5f5e5a', transition: 'all 0.15s' }}>
                 {v.label}
               </button>
             ))}
           </div>
 
-          <div style={{ width: '1px', height: '24px', background: '#d3d1c7' }} />
+          <div style={{ width: '1px', height: '24px', background: '#e8e6e0' }} />
 
           {/* Association pills */}
-          <div style={{ fontSize: '12px', color: '#888780' }}>Filter:</div>
+          <span style={{ fontSize: '11px', fontWeight: '600', color: '#aaa8a0', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Assoc:</span>
           {['all', ...associations.map(a => a.short_name), 'private'].map(a => (
             <button key={a} onClick={() => setAssocFilter(a)}
-              style={{ padding: '4px 12px', borderRadius: '20px', fontSize: '12px', fontWeight: '500', cursor: 'pointer', border: '0.5px solid', borderColor: assocFilter === a ? '#0C447C' : '#d3d1c7', background: assocFilter === a ? '#0C447C' : '#fff', color: assocFilter === a ? '#fff' : '#5f5e5a' }}>
+              style={{ padding: '5px 12px', borderRadius: '20px', fontSize: '12px', fontWeight: '500', cursor: 'pointer', border: '1px solid', borderColor: assocFilter === a ? '#0C447C' : '#e8e6e0', background: assocFilter === a ? '#0C447C' : '#fff', color: assocFilter === a ? '#fff' : '#5f5e5a', transition: 'all 0.15s' }}>
               {a === 'all' ? 'All' : a.charAt(0).toUpperCase() + a.slice(1)}
             </button>
           ))}
 
-          <div style={{ width: '1px', height: '24px', background: '#d3d1c7' }} />
+          <div style={{ width: '1px', height: '24px', background: '#e8e6e0' }} />
 
           {/* Status pills */}
+          <span style={{ fontSize: '11px', fontWeight: '600', color: '#aaa8a0', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Status:</span>
           {['all', 'draft', 'sent', 'paid'].map(s => (
             <button key={s} onClick={() => setStatusFilter(s)}
-              style={{ padding: '4px 12px', borderRadius: '20px', fontSize: '12px', fontWeight: '500', cursor: 'pointer', border: '0.5px solid', borderColor: statusFilter === s ? '#185FA5' : '#d3d1c7', background: statusFilter === s ? '#185FA5' : '#fff', color: statusFilter === s ? '#fff' : '#5f5e5a' }}>
+              style={{ padding: '5px 12px', borderRadius: '20px', fontSize: '12px', fontWeight: '500', cursor: 'pointer', border: '1px solid', borderColor: statusFilter === s ? '#185FA5' : '#e8e6e0', background: statusFilter === s ? '#185FA5' : '#fff', color: statusFilter === s ? '#fff' : '#5f5e5a', transition: 'all 0.15s' }}>
               {s.charAt(0).toUpperCase() + s.slice(1)}
             </button>
           ))}
@@ -308,13 +747,26 @@ export default function Invoices({ staff }) {
       )}
 
       {/* Empty / loading state */}
+      {pageError && !loading && (
+        <div style={{ background: '#fcebeb', border: '0.5px solid #f09595', borderRadius: '12px', padding: '10px 14px', marginBottom: '1rem', color: '#a32d2d', fontSize: '13px' }}>
+          {pageError}
+        </div>
+      )}
+
       {loading ? (
-        <div style={{ textAlign: 'center', padding: '3rem', color: '#888', fontSize: '13px', background: '#fff', borderRadius: '12px', border: '0.5px solid #d3d1c7' }}>Loading invoices...</div>
+        <div style={{ textAlign: 'center', padding: '4rem', color: '#888', fontSize: '13px', background: '#fff', borderRadius: '14px', border: '1px solid #e8e6e0', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
+          <div style={{ width: '36px', height: '36px', border: '3px solid #E6F1FB', borderTopColor: '#0C447C', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+          <span style={{ color: '#888780' }}>Loading invoices…</span>
+        </div>
       ) : invoices.length === 0 ? (
-        <div style={{ textAlign: 'center', padding: '3rem', background: '#fff', borderRadius: '12px', border: '0.5px solid #d3d1c7' }}>
-          <div style={{ fontSize: '32px', marginBottom: '8px' }}>🧾</div>
-          <div style={{ fontSize: '14px', fontWeight: '500', color: '#2c2c2a', marginBottom: '4px' }}>No invoices for {months[selectedMonth-1]} {selectedYear}</div>
-          <div style={{ fontSize: '13px', color: '#888780' }}>Click "Generate invoice run" to create invoices from approved time entries.</div>
+        <div style={{ textAlign: 'center', padding: '4rem 2rem', background: '#fff', borderRadius: '14px', border: '1px solid #e8e6e0' }}>
+          <div style={{ width: '56px', height: '56px', borderRadius: '16px', background: '#E6F1FB', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 14px', fontSize: '24px' }}>🧾</div>
+          <div style={{ fontSize: '16px', fontWeight: '600', color: '#1a1a18', marginBottom: '6px', letterSpacing: '-0.2px' }}>No invoices for {months[selectedMonth-1]} {selectedYear}</div>
+          <div style={{ fontSize: '13px', color: '#888780', marginBottom: '1.5rem' }}>Generate an invoice run to create invoices from approved time entries.</div>
+          <button onClick={generateRun} disabled={generating}
+            style={{ padding: '9px 20px', background: 'linear-gradient(135deg, #0C447C 0%, #185FA5 100%)', color: '#fff', border: 'none', borderRadius: '10px', fontSize: '13px', fontWeight: '600', cursor: 'pointer', boxShadow: '0 2px 8px rgba(12,68,124,0.28)' }}>
+            {generating ? 'Generating…' : 'Generate invoice run'}
+          </button>
         </div>
       ) : (
         <>
@@ -480,20 +932,30 @@ export default function Invoices({ staff }) {
 
       {/* Invoice preview modal */}
       {previewInvoice && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', zIndex: 100, padding: '2rem 1rem', overflowY: 'auto' }}>
-          <div style={{ background: '#fff', borderRadius: '12px', width: '100%', maxWidth: '600px', marginBottom: '2rem', overflow: 'hidden', border: '0.5px solid #d3d1c7' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '1rem 1.5rem', borderBottom: '0.5px solid #d3d1c7', background: '#f1efe8' }}>
-              <div style={{ fontSize: '14px', fontWeight: '500', color: '#2c2c2a' }}>Invoice preview — {previewInvoice.invoice_number}</div>
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', zIndex: 100, padding: '2rem 1rem', overflowY: 'auto' }}>
+          <div style={{ background: '#fff', borderRadius: '16px', width: '100%', maxWidth: '640px', marginBottom: '2rem', overflow: 'hidden', border: '1px solid #e8e6e0', boxShadow: '0 24px 60px rgba(0,0,0,0.18)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '1rem 1.5rem', borderBottom: '1px solid #e8e6e0', background: 'linear-gradient(135deg, #0C447C 0%, #185FA5 100%)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="rgba(255,255,255,0.8)" strokeWidth="1.5">
+                  <rect x="2" y="2" width="12" height="12" rx="1.5"/><path d="M5 8h6M5 5h6M5 11h4"/>
+                </svg>
+                <div style={{ fontSize: '13px', fontWeight: '600', color: '#fff' }}>Invoice Preview</div>
+                <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.65)', fontFamily: 'monospace' }}>{previewInvoice.invoice_number}</div>
+              </div>
               <div style={{ display: 'flex', gap: '8px' }}>
-                <button onClick={() => printInvoice(previewInvoice)} style={{ padding: '6px 14px', border: '0.5px solid #d3d1c7', borderRadius: '8px', background: '#fff', fontSize: '12px', cursor: 'pointer', color: '#5f5e5a' }}>🖨 Print / PDF</button>
-                <button onClick={() => setPreviewInvoice(null)} style={{ padding: '6px 14px', border: 'none', borderRadius: '8px', background: '#0C447C', color: '#fff', fontSize: '12px', cursor: 'pointer' }}>Close</button>
+                <button onClick={() => printInvoice(previewInvoice)} style={{ padding: '6px 14px', border: '1px solid rgba(255,255,255,0.3)', borderRadius: '8px', background: 'rgba(255,255,255,0.12)', fontSize: '12px', cursor: 'pointer', color: '#fff', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="3" y="7" width="10" height="7" rx="1"/><path d="M3 9V4a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v5M5 3V2h6v1"/></svg>
+                  Print / PDF
+                </button>
+                <button onClick={() => setPreviewInvoice(null)} style={{ padding: '6px 12px', border: 'none', borderRadius: '8px', background: 'rgba(255,255,255,0.18)', color: '#fff', fontSize: '18px', cursor: 'pointer', lineHeight: 1, display: 'flex', alignItems: 'center' }}>✕</button>
               </div>
             </div>
             <div style={{ padding: '2rem' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1.5rem', paddingBottom: '1rem', borderBottom: '3px solid #0C447C' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1.5rem', paddingBottom: '1.25rem', borderBottom: '3px solid #0C447C' }}>
                 <div>
-                  <div style={{ fontSize: '20px', fontWeight: '500', color: '#0C447C' }}>{firmInfo.name}</div>
-                  <div style={{ fontSize: '11px', color: '#888780', marginTop: '4px', lineHeight: '1.6' }}>{firmInfo.address}<br />{firmInfo.city}<br />Tel: {firmInfo.phone} · {firmInfo.website}</div>
+                  {logoImage && <img src={logoImage} alt="Stone Busailah LLP" style={{ display: 'block', width: '160px', maxWidth: '100%', height: 'auto', marginBottom: '12px' }} />}
+                  <div style={{ fontSize: '20px', fontWeight: '600', color: '#0C447C', letterSpacing: '-0.3px' }}>{firmInfo.name}</div>
+                  <div style={{ fontSize: '11px', color: '#888780', marginTop: '4px', lineHeight: '1.7' }}>{firmInfo.address}<br />{firmInfo.city}<br />Tel: {firmInfo.phone} · {firmInfo.website}</div>
                 </div>
                 <div style={{ textAlign: 'right', fontSize: '12px', color: '#5f5e5a', lineHeight: '1.8' }}>
                   <div style={{ fontSize: '18px', fontWeight: '500', color: '#0C447C', marginBottom: '4px' }}>{previewInvoice.invoice_number}</div>
@@ -516,7 +978,17 @@ export default function Invoices({ staff }) {
                   <div style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.06em', color: '#888780', marginBottom: '6px' }}>Re: Client / Matter</div>
                   <div style={{ fontSize: '13px', color: '#2c2c2a', lineHeight: '1.6' }}>
                     {previewInvoice.cases?.clients && <><strong>{previewInvoice.cases.clients.first_name} {previewInvoice.cases.clients.last_name}</strong><br /></>}
-                    SB File No.: <strong>{previewInvoice.cases?.sb_number || '—'}</strong>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                      <span>SB File No.:</span>
+                      <input
+                        type="text"
+                        value={previewInvoice.cases?.sb_number || ''}
+                        onChange={e => setPreviewInvoice(prev => ({ ...prev, cases: { ...prev.cases, sb_number: e.target.value } }))}
+                        onBlur={e => updateInvoiceSbNumber(previewInvoice, e.target.value)}
+                        disabled={savingSbNumber}
+                        style={{ padding: '4px 8px', border: '0.5px solid #d3d1c7', borderRadius: '6px', fontSize: '12px', color: '#185FA5', fontWeight: '600', minWidth: '120px' }}
+                      />
+                    </div>
                     {previewInvoice.cases?.association_case_number && <><br />Assoc. Case No.: <strong>{previewInvoice.cases.association_case_number}</strong></>}
                     <br />Matter: {previewInvoice.cases?.brief_description || '—'}
                   </div>
@@ -556,6 +1028,140 @@ export default function Invoices({ staff }) {
           </div>
         </div>
       )}
+
+      {showCreateForm && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', zIndex: 110, padding: '2rem 1rem', overflowY: 'auto' }}>
+          <div style={{ background: '#fff', borderRadius: '16px', width: '100%', maxWidth: '560px', overflow: 'hidden', border: '1px solid #e8e6e0', boxShadow: '0 24px 60px rgba(0,0,0,0.18)', marginBottom: '2rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '1.1rem 1.5rem', borderBottom: '1px solid #e8e6e0', background: 'linear-gradient(135deg, #0C447C 0%, #185FA5 100%)' }}>
+              <div>
+                <div style={{ fontSize: '15px', fontWeight: '600', color: '#fff', letterSpacing: '-0.2px' }}>Create new invoice</div>
+                <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.65)', marginTop: '2px' }}>Create a draft invoice from approved time entries</div>
+              </div>
+              <button onClick={() => setShowCreateForm(false)} style={{ background: 'rgba(255,255,255,0.15)', border: 'none', borderRadius: '8px', width: '30px', height: '30px', fontSize: '16px', color: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
+            </div>
+            <div style={{ padding: '1.75rem' }}>
+
+            <form onSubmit={handleCreateInvoice}>
+              <div style={{ marginBottom: '14px' }}>
+                <label style={{ fontSize: '12px', fontWeight: '500', color: '#5f5e5a', display: 'block', marginBottom: '6px' }}>Invoice type</label>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                  {[
+                    { key: 'case', label: 'Case invoice' },
+                    { key: 'association', label: 'Association invoice' },
+                  ].map(option => (
+                    <button
+                      key={option.key}
+                      type="button"
+                      onClick={() => setCreateForm(prev => ({ ...prev, targetType: option.key, caseId: '', associationId: '' }))}
+                      style={{
+                        padding: '10px 12px',
+                        borderRadius: '8px',
+                        cursor: 'pointer',
+                        border: createForm.targetType === option.key ? '2px solid #0C447C' : '0.5px solid #d3d1c7',
+                        background: createForm.targetType === option.key ? '#E6F1FB' : '#fff',
+                        color: createForm.targetType === option.key ? '#0C447C' : '#5f5e5a',
+                        fontSize: '13px',
+                        fontWeight: createForm.targetType === option.key ? '500' : '400',
+                      }}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {createForm.targetType === 'case' && (
+                <div style={{ marginBottom: '14px' }}>
+                  <label style={{ fontSize: '12px', fontWeight: '500', color: '#5f5e5a', display: 'block', marginBottom: '6px' }}>Case</label>
+                  <input
+                    type="text"
+                    value={createForm.caseQuery}
+                    onChange={e => setCreateField('caseQuery', e.target.value)}
+                    placeholder="Search by SB no., client, or matter..."
+                    style={{ width: '100%', padding: '8px 10px', border: '0.5px solid #b4b2a9', borderRadius: '8px', fontSize: '13px', color: '#2c2c2a', background: '#fff', marginBottom: '8px' }}
+                  />
+                  <select value={createForm.caseId} onChange={e => setCreateField('caseId', e.target.value)} style={{ width: '100%', padding: '8px 10px', border: '0.5px solid #b4b2a9', borderRadius: '8px', fontSize: '13px', color: '#2c2c2a', background: '#fff' }}>
+                    <option value="">Select case...</option>
+                    {cases
+                      .filter(c => matchesSearch([c.sb_number, c.clients?.first_name, c.clients?.last_name, c.brief_description], createForm.caseQuery))
+                      .map(c => (
+                        <option key={c.id} value={c.id}>
+                          {c.sb_number} - {c.clients?.last_name}, {c.clients?.first_name} {c.brief_description ? `- ${c.brief_description}` : ''}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              )}
+
+              {createForm.targetType === 'association' && (
+                <div style={{ marginBottom: '14px' }}>
+                  <label style={{ fontSize: '12px', fontWeight: '500', color: '#5f5e5a', display: 'block', marginBottom: '6px' }}>Association</label>
+                  <select value={createForm.associationId} onChange={e => setCreateField('associationId', e.target.value)} style={{ width: '100%', padding: '8px 10px', border: '0.5px solid #b4b2a9', borderRadius: '8px', fontSize: '13px', color: '#2c2c2a', background: '#fff' }}>
+                    <option value="">Select association...</option>
+                    {associations.map(assoc => (
+                      <option key={assoc.id} value={assoc.id}>{assoc.short_name} - {assoc.name}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '14px' }}>
+                <div>
+                  <label style={{ fontSize: '12px', fontWeight: '500', color: '#5f5e5a', display: 'block', marginBottom: '6px' }}>Invoice number</label>
+                  <input type="text" value={createForm.invoiceNumber} onChange={e => setCreateField('invoiceNumber', e.target.value)} placeholder="Leave blank to auto-generate" style={{ width: '100%', padding: '8px 10px', border: '0.5px solid #b4b2a9', borderRadius: '8px', fontSize: '13px', color: '#2c2c2a', background: '#fff' }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: '12px', fontWeight: '500', color: '#5f5e5a', display: 'block', marginBottom: '6px' }}>Invoice date</label>
+                  <input type="date" value={createForm.invoiceDate} onChange={e => setCreateField('invoiceDate', e.target.value)} style={{ width: '100%', padding: '8px 10px', border: '0.5px solid #b4b2a9', borderRadius: '8px', fontSize: '13px', color: '#2c2c2a', background: '#fff' }} />
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '14px' }}>
+                <div>
+                  <label style={{ fontSize: '12px', fontWeight: '500', color: '#5f5e5a', display: 'block', marginBottom: '6px' }}>Start date</label>
+                  <input type="date" value={createForm.startDate} onChange={e => setCreateField('startDate', e.target.value)} style={{ width: '100%', padding: '8px 10px', border: '0.5px solid #b4b2a9', borderRadius: '8px', fontSize: '13px', color: '#2c2c2a', background: '#fff' }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: '12px', fontWeight: '500', color: '#5f5e5a', display: 'block', marginBottom: '6px' }}>End date</label>
+                  <input type="date" value={createForm.endDate} onChange={e => setCreateField('endDate', e.target.value)} style={{ width: '100%', padding: '8px 10px', border: '0.5px solid #b4b2a9', borderRadius: '8px', fontSize: '13px', color: '#2c2c2a', background: '#fff' }} />
+                </div>
+              </div>
+
+              <div style={{ marginBottom: '14px' }}>
+                <label style={{ fontSize: '12px', fontWeight: '500', color: '#5f5e5a', display: 'block', marginBottom: '6px' }}>Due date</label>
+                <input type="date" value={createForm.dueDate} onChange={e => setCreateField('dueDate', e.target.value)} style={{ width: '100%', padding: '8px 10px', border: '0.5px solid #b4b2a9', borderRadius: '8px', fontSize: '13px', color: '#2c2c2a', background: '#fff' }} />
+              </div>
+
+              <div style={{ background: '#f1efe8', borderRadius: '8px', padding: '10px 12px', marginBottom: '14px', fontSize: '12px', color: '#5f5e5a' }}>
+                The invoice amount will be calculated from approved time entries between the selected dates. The invoice will be saved as a draft in the billing period for the selected end date.
+              </div>
+
+              {createError && (
+                <div style={{ background: '#fcebeb', border: '0.5px solid #f09595', borderRadius: '8px', padding: '8px 12px', fontSize: '12px', color: '#a32d2d', marginBottom: '1rem' }}>
+                  {createError}
+                </div>
+              )}
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                <button type="button" onClick={() => setShowCreateForm(false)} style={{ padding: '8px 18px', border: '0.5px solid #d3d1c7', borderRadius: '8px', background: '#fff', fontSize: '13px', cursor: 'pointer', color: '#5f5e5a' }}>
+                  Cancel
+                </button>
+                <button type="submit" disabled={creatingInvoice} style={{ padding: '8px 18px', border: 'none', borderRadius: '10px', background: creatingInvoice ? '#8aadcf' : 'linear-gradient(135deg, #0C447C 0%, #185FA5 100%)', color: '#fff', fontSize: '13px', fontWeight: '600', cursor: creatingInvoice ? 'not-allowed' : 'pointer', boxShadow: creatingInvoice ? 'none' : '0 2px 8px rgba(12,68,124,0.28)' }}>
+                  {creatingInvoice ? 'Creating…' : 'Create invoice'}
+                </button>
+              </div>
+            </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <style>{`
+        @keyframes spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+      `}</style>
     </div>
   )
 }

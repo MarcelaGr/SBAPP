@@ -1,6 +1,8 @@
 import { useEffect, useState, useRef } from 'react'
 import { supabase } from '../supabaseClient'
 import NewCaseForm from './NewCaseForm'
+import { getCaseSearchValues, matchesSearch } from '../lib/search'
+import { normalizeSbNumber } from '../lib/sb'
 
 export default function Cases({ staff, isAttorney }) {
   const [cases, setCases] = useState([])
@@ -166,13 +168,20 @@ export default function Cases({ staff, isAttorney }) {
   }
 
   const filtered = cases.filter(c => {
-    const clientName = `${c.clients?.first_name} ${c.clients?.last_name}`.toLowerCase()
-    const q = search.toLowerCase()
-    const matchQ = !q || c.sb_number?.toLowerCase().includes(q) || clientName.includes(q) || c.brief_description?.toLowerCase().includes(q)
+    const matchQ = matchesSearch(getCaseSearchValues(c), search)
     const matchStatus = statusFilter === 'all' || c.status === statusFilter
     const matchCat = categoryFilter === 'all' || c.case_category === categoryFilter
     return matchQ && matchStatus && matchCat
   })
+
+  async function updateCaseSbNumber(caseId, nextSbNumber) {
+    const normalized = normalizeSbNumber(nextSbNumber)
+    if (!normalized) return
+
+    await supabase.from('cases').update({ sb_number: normalized }).eq('id', caseId)
+    setCases(prev => prev.map(item => item.id === caseId ? { ...item, sb_number: normalized } : item))
+    setSelectedCase(prev => prev?.id === caseId ? { ...prev, sb_number: normalized } : prev)
+  }
 
   const statusBadge = (status) => {
     const styles = { active: { background: '#eaf3de', color: '#27500a' }, pending: { background: '#faeeda', color: '#633806' }, closed: { background: '#f1efe8', color: '#5f5e5a' } }
@@ -248,7 +257,6 @@ export default function Cases({ staff, isAttorney }) {
           </div>
           <div style={{ display: 'flex', gap: '1.5rem', flexWrap: 'wrap' }}>
             {[
-              { label: 'SB file no.', value: c.sb_number },
               { label: 'Assoc. case no.', value: c.association_case_number || '—' },
               { label: 'Opened', value: formatDate(c.opened_at) },
               { label: 'Billing', value: c.billing_type === 'hourly' ? `Hourly${c.private_hourly_rate ? ' · $' + c.private_hourly_rate + '/hr' : ''}` : `Flat fee${c.flat_fee_amount ? ' · $' + c.flat_fee_amount : ''}` },
@@ -258,6 +266,16 @@ export default function Cases({ staff, isAttorney }) {
                 <span style={{ color: '#2c2c2a', fontWeight: '500' }}>{item.value}</span>
               </div>
             ))}
+            <div style={{ fontSize: '12px', minWidth: '220px' }}>
+              <span style={{ color: '#888780', display: 'block', marginBottom: '4px' }}>SB file no.</span>
+              <input
+                type="text"
+                value={c.sb_number || ''}
+                onChange={e => setSelectedCase(prev => ({ ...prev, sb_number: e.target.value }))}
+                onBlur={e => updateCaseSbNumber(c.id, e.target.value)}
+                style={{ width: '100%', padding: '6px 8px', border: '0.5px solid #d3d1c7', borderRadius: '8px', fontSize: '12px', color: '#185FA5', fontWeight: '500' }}
+              />
+            </div>
           </div>
         </div>
 

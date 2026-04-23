@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../supabaseClient'
+import { getClientSearchValues, matchesSearch } from '../lib/search'
+import { normalizeSbNumber } from '../lib/sb'
 
 // ─── NEW / EDIT CLIENT FORM ───────────────────────────────────
 function ClientForm({ client, onClose, onSaved }) {
@@ -8,6 +10,7 @@ function ClientForm({ client, onClose, onSaved }) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [form, setForm] = useState({
+    sb_number: client?.sb_number || '',
     first_name: client?.first_name || '',
     last_name: client?.last_name || '',
     email: client?.email || '',
@@ -39,6 +42,7 @@ function ClientForm({ client, onClose, onSaved }) {
 
     setSaving(true)
     const payload = {
+      sb_number: normalizeSbNumber(form.sb_number) || null,
       first_name: form.first_name.trim(),
       last_name: form.last_name.trim(),
       email: form.email.trim() || null,
@@ -85,6 +89,10 @@ function ClientForm({ client, onClose, onSaved }) {
 
         <form onSubmit={handleSubmit}>
           <div style={sectionLabel}>Personal information</div>
+          <div style={fieldStyle}>
+            <label style={labelStyle}>SB No.</label>
+            <input type="text" value={form.sb_number} onChange={e => setField('sb_number', e.target.value)} placeholder="e.g. SB 26-0142" style={inputStyle} />
+          </div>
           <div style={{ ...fieldStyle, ...gridStyle }}>
             <div>
               <label style={labelStyle}>First name <span style={{ color: '#a32d2d' }}>*</span></label>
@@ -269,6 +277,7 @@ function ClientDetail({ client: initialClient, onBack, onDeleted, staff }) {
         <div style={{ background: '#fff', border: '0.5px solid #d3d1c7', borderRadius: '12px', padding: '1.25rem' }}>
           <div style={{ fontSize: '11px', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '0.05em', color: '#888780', marginBottom: '0.75rem' }}>Client information</div>
           {[
+            { label: 'SB No.', value: client.sb_number || '—' },
             { label: 'Full name', value: `${client.first_name} ${client.last_name}` },
             { label: 'Email', value: client.email || '—' },
             { label: 'Phone', value: client.phone || '—' },
@@ -407,8 +416,7 @@ export default function Clients({ staff }) {
   }, [])
 
   const filtered = clients.filter(c => {
-    const q = search.toLowerCase()
-    const matchQ = !q || `${c.first_name} ${c.last_name}`.toLowerCase().includes(q) || c.email?.toLowerCase().includes(q) || c.member_id?.toLowerCase().includes(q)
+    const matchQ = matchesSearch(getClientSearchValues(c), search)
     const matchType = typeFilter === 'all' || c.client_type === typeFilter
     return matchQ && matchType
   })

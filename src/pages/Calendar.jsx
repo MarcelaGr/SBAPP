@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../supabaseClient'
+import { getCalendarEventSearchValues, matchesSearch } from '../lib/search'
 
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December']
 const DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
@@ -37,8 +38,8 @@ function NewEventForm({ staff, attorneys, selectedDate, onClose, onSaved }) {
       .from('cases')
       .select('id, sb_number, brief_description, clients(first_name, last_name), associations(short_name)')
       .or(`sb_number.ilike.%${q}%,brief_description.ilike.%${q}%`)
-      .limit(6)
-    setCaseResults(data || [])
+      .limit(25)
+    setCaseResults((data || []).filter(item => matchesSearch(getCalendarEventSearchValues({ title: item.brief_description, cases: item }), q)).slice(0, 6))
   }
 
   useEffect(() => {
@@ -251,6 +252,7 @@ export default function Calendar({ staff }) {
   const [attorneys, setAttorneys] = useState([])
   const [selectedAttorneys, setSelectedAttorneys] = useState([])
   const [selectedTypes, setSelectedTypes] = useState(EVENT_TYPES.map(t => t.value))
+  const [search, setSearch] = useState('')
   const [showNewEvent, setShowNewEvent] = useState(false)
   const [newEventDate, setNewEventDate] = useState(null)
   const [selectedEvent, setSelectedEvent] = useState(null)
@@ -307,7 +309,7 @@ export default function Calendar({ staff }) {
   function toggleAttorney(id) { setSelectedAttorneys(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]) }
   function toggleType(type) { setSelectedTypes(prev => prev.includes(type) ? prev.filter(x => x !== type) : [...prev, type]) }
 
-  const filteredEvents = events.filter(e => selectedAttorneys.includes(e.attorney_id) && selectedTypes.includes(e.event_type))
+  const filteredEvents = events.filter(e => selectedAttorneys.includes(e.attorney_id) && selectedTypes.includes(e.event_type) && matchesSearch(getCalendarEventSearchValues(e), search))
 
   const firstDayOfMonth = new Date(currentYear, currentMonth, 1).getDay()
   const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate()
@@ -335,10 +337,17 @@ export default function Calendar({ staff }) {
     <div style={{ padding: '1.25rem', fontFamily: 'sans-serif', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
         <div style={{ fontSize: '15px', fontWeight: '500', color: '#2c2c2a' }}>Calendar</div>
-        <button onClick={() => { setNewEventDate(null); setShowNewEvent(true) }}
-          style={{ padding: '6px 14px', background: '#0C447C', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '12px', fontWeight: '500', cursor: 'pointer' }}>
-          + New event
-        </button>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', background: '#fff', border: '0.5px solid #d3d1c7', borderRadius: '8px', padding: '5px 10px' }}>
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#888" strokeWidth="1.5"><circle cx="7" cy="7" r="5"/><path d="M11 11l3 3"/></svg>
+            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search SB no., event, attorney..."
+              style={{ border: 'none', background: 'transparent', fontSize: '13px', outline: 'none', width: '220px', color: '#2c2c2a' }} />
+          </div>
+          <button onClick={() => { setNewEventDate(null); setShowNewEvent(true) }}
+            style={{ padding: '6px 14px', background: '#0C447C', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '12px', fontWeight: '500', cursor: 'pointer' }}>
+            + New event
+          </button>
+        </div>
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 240px', gap: '1rem', alignItems: 'start' }}>
