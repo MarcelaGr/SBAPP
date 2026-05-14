@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../supabaseClient'
 import { getCaseSearchValues, matchesSearch } from '../lib/search'
+import { normalizeCaseType } from '../lib/caseTypes'
 
 export default function CaseList() {
   const [cases, setCases] = useState([])
@@ -217,7 +218,7 @@ export default function CaseList() {
             style={{ fontSize: '13px', padding: '5px 10px', border: '0.5px solid #d3d1c7', borderRadius: '8px', background: '#fff', color: '#2c2c2a', cursor: 'pointer' }}>
             <option value="all">All associations</option>
             {associations.map(a => <option key={a.id} value={a.short_name}>{a.short_name}</option>)}
-            <option value="private">Private (TRS / FL-TRST)</option>
+            <option value="private">Private (TRST / FL-TRST)</option>
           </select>
 
           {/* Status filter */}
@@ -268,7 +269,7 @@ export default function CaseList() {
               <tbody>
                 {filtered.map((c, idx) => {
                   const lead = c.case_attorneys?.find(a => a.is_lead)
-                  const assoc = c.case_category === 'association' ? c.associations?.short_name : (c.case_type || 'Private')
+                  const assoc = c.case_category === 'association' ? c.associations?.short_name : (normalizeCaseType(c.case_type) || 'Private')
                   const isPrivate = c.case_category === 'private'
                   const date = c.opened_at ? new Date(c.opened_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'
                   return (

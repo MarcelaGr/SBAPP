@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { supabase } from './supabaseClient'
+import { supabase, supabaseEnvError } from './supabaseClient'
 import logoImage from './assets/logo.png'
 import marbleBg from './assets/marble-bg.jpg'
 
@@ -10,29 +10,47 @@ export default function Login() {
   const [loading, setLoading] = useState(false)
   const [focusedField, setFocusedField] = useState(null)
 
+  function getLoginErrorMessage(error) {
+    const message = error?.message || String(error)
+
+    if (message.toLowerCase().includes('failed to fetch')) {
+      return `${supabaseEnvError || 'Could not reach Supabase.'} Check that VITE_SUPABASE_URL points to an active Supabase project and that your network can reach it.`
+    }
+
+    return message
+  }
+
   async function handleLogin(e) {
     e.preventDefault()
     setLoading(true)
     setError('')
 
-    const { error } = await supabase.auth.signInWithPassword({
-      email,
-      password
-    })
+    try {
+      const { error } = await supabase.auth.signInWithPassword({
+        email,
+        password
+      })
 
-    if (error) {
-      setError(error.message)
+      if (error) {
+        setError(getLoginErrorMessage(error))
+        setLoading(false)
+      }
+    } catch (error) {
+      setError(getLoginErrorMessage(error))
       setLoading(false)
     }
   }
 
   return (
-    <div style={{
-      minHeight: '100vh',
-      display: 'flex',
-      fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif",
-    }}>
-      {/* Left panel — marble background */}
+      <div style={{
+        minHeight: '100dvh',
+        display: 'flex',
+        fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif",
+        background: '#3a5080',
+        width: '100%',
+        boxSizing: 'border-box',
+      }}>
+      {/* Left panel */}
       <div style={{
         flex: '1 1 55%',
         background: `url(${marbleBg}) center/cover no-repeat`,
@@ -40,22 +58,21 @@ export default function Login() {
         flexDirection: 'column',
         alignItems: 'flex-start',
         justifyContent: 'flex-end',
-        padding: '3rem',
+        padding: 'clamp(1.5rem, 4vw, 3rem)',
         position: 'relative',
         overflow: 'hidden',
-      }}>
-        {/* Dark overlay for readability */}
+      }} className="login-left-panel">
         <div style={{
           position: 'absolute',
           inset: 0,
-          background: 'linear-gradient(135deg, rgba(12,68,124,0.82) 0%, rgba(12,68,124,0.45) 60%, rgba(0,0,0,0.25) 100%)',
+          background: 'linear-gradient(135deg, rgba(58,80,128,0.82) 0%, rgba(58,80,128,0.45) 60%, rgba(0,0,0,0.22) 100%)',
         }} />
         <div style={{ position: 'relative', zIndex: 1 }}>
           <div style={{
             fontSize: '13px',
             letterSpacing: '0.12em',
             textTransform: 'uppercase',
-            color: 'rgba(255,255,255,0.65)',
+            color: 'rgba(255,255,255,0.78)',
             marginBottom: '8px',
             fontWeight: '500'
           }}>
@@ -82,16 +99,21 @@ export default function Login() {
       {/* Right panel — login form */}
       <div style={{
         flex: '1 1 45%',
-        background: '#faf9f7',
+        background: '#3a5080',
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
         justifyContent: 'center',
-        padding: '3rem 2.5rem',
-        minWidth: '360px',
-        maxWidth: '520px',
-      }}>
-        <div style={{ width: '100%', maxWidth: '380px' }}>
+        padding: 'clamp(1.5rem, 4vw, 3rem)',
+        minWidth: 0,
+        width: '100%',
+        boxSizing: 'border-box',
+      }} className="login-right-panel">
+        <div style={{
+          width: '100%',
+          maxWidth: '380px',
+          color: '#fff',
+        }}>
 
           {/* Logo */}
           <div style={{ marginBottom: '2.5rem', textAlign: 'center' }}>
@@ -108,7 +130,7 @@ export default function Login() {
             />
             <div style={{
               height: '1px',
-              background: 'linear-gradient(to right, transparent, #d3d1c7, transparent)',
+              background: 'linear-gradient(to right, transparent, rgba(255,255,255,0.4), transparent)',
               margin: '0 auto',
               maxWidth: '240px',
             }} />
@@ -117,13 +139,13 @@ export default function Login() {
           <h2 style={{
             fontSize: '22px',
             fontWeight: '600',
-            color: '#1a1a18',
+            color: '#fff',
             marginBottom: '6px',
             letterSpacing: '-0.3px',
           }}>
             Welcome back
           </h2>
-          <p style={{ fontSize: '14px', color: '#888780', marginBottom: '2rem', lineHeight: '1.5' }}>
+          <p style={{ fontSize: '14px', color: 'rgba(255,255,255,0.8)', marginBottom: '2rem', lineHeight: '1.5' }}>
             Sign in to access your staff portal
           </p>
 
@@ -132,7 +154,7 @@ export default function Login() {
               <label style={{
                 fontSize: '12px',
                 fontWeight: '600',
-                color: '#5f5e5a',
+                color: '#fff',
                 display: 'block',
                 marginBottom: '6px',
                 letterSpacing: '0.04em',
@@ -151,16 +173,16 @@ export default function Login() {
                 style={{
                   width: '100%',
                   padding: '11px 14px',
-                  border: focusedField === 'email' ? '1.5px solid #0C447C' : '1px solid #d3d1c7',
+                  border: focusedField === 'email' ? '1.5px solid #ffffff' : '1px solid rgba(255,255,255,0.45)',
                   borderRadius: '10px',
                   fontSize: '14px',
                   outline: 'none',
                   fontFamily: 'inherit',
                   boxSizing: 'border-box',
-                  background: '#fff',
-                  color: '#1a1a18',
+                  background: 'rgba(255,255,255,0.1)',
+                  color: '#fff',
                   transition: 'border-color 0.15s, box-shadow 0.15s',
-                  boxShadow: focusedField === 'email' ? '0 0 0 3px rgba(12,68,124,0.08)' : 'none',
+                  boxShadow: focusedField === 'email' ? '0 0 0 3px rgba(255,255,255,0.12)' : 'none',
                 }}
               />
             </div>
@@ -169,7 +191,7 @@ export default function Login() {
               <label style={{
                 fontSize: '12px',
                 fontWeight: '600',
-                color: '#5f5e5a',
+                color: '#fff',
                 display: 'block',
                 marginBottom: '6px',
                 letterSpacing: '0.04em',
@@ -188,16 +210,16 @@ export default function Login() {
                 style={{
                   width: '100%',
                   padding: '11px 14px',
-                  border: focusedField === 'password' ? '1.5px solid #0C447C' : '1px solid #d3d1c7',
+                  border: focusedField === 'password' ? '1.5px solid #ffffff' : '1px solid rgba(255,255,255,0.45)',
                   borderRadius: '10px',
                   fontSize: '14px',
                   outline: 'none',
                   fontFamily: 'inherit',
                   boxSizing: 'border-box',
-                  background: '#fff',
-                  color: '#1a1a18',
+                  background: 'rgba(255,255,255,0.1)',
+                  color: '#fff',
                   transition: 'border-color 0.15s, box-shadow 0.15s',
-                  boxShadow: focusedField === 'password' ? '0 0 0 3px rgba(12,68,124,0.08)' : 'none',
+                  boxShadow: focusedField === 'password' ? '0 0 0 3px rgba(255,255,255,0.12)' : 'none',
                 }}
               />
             </div>
@@ -230,8 +252,8 @@ export default function Login() {
                 width: '100%',
                 padding: '12px',
                 background: loading
-                  ? '#6b8fb8'
-                  : 'linear-gradient(135deg, #0C447C 0%, #185FA5 100%)',
+                  ? '#7a7a7a'
+                  : '#8a8f98',
                 color: '#fff',
                 border: 'none',
                 borderRadius: '10px',
@@ -240,11 +262,11 @@ export default function Login() {
                 cursor: loading ? 'not-allowed' : 'pointer',
                 fontFamily: 'inherit',
                 letterSpacing: '0.02em',
-                boxShadow: loading ? 'none' : '0 2px 8px rgba(12,68,124,0.3)',
+                boxShadow: loading ? 'none' : '0 10px 24px rgba(20, 24, 33, 0.22)',
                 transition: 'box-shadow 0.15s, transform 0.1s',
               }}
-              onMouseEnter={e => { if (!loading) e.currentTarget.style.boxShadow = '0 4px 16px rgba(12,68,124,0.4)' }}
-              onMouseLeave={e => { if (!loading) e.currentTarget.style.boxShadow = '0 2px 8px rgba(12,68,124,0.3)' }}
+              onMouseEnter={e => { if (!loading) e.currentTarget.style.boxShadow = '0 12px 28px rgba(20, 24, 33, 0.3)' }}
+              onMouseLeave={e => { if (!loading) e.currentTarget.style.boxShadow = '0 10px 24px rgba(20, 24, 33, 0.22)' }}
             >
               {loading ? (
                 <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
@@ -260,10 +282,10 @@ export default function Login() {
           <div style={{
             marginTop: '2rem',
             paddingTop: '1.5rem',
-            borderTop: '1px solid #e8e6e0',
+            borderTop: '1px solid rgba(255,255,255,0.18)',
             textAlign: 'center',
           }}>
-            <div style={{ fontSize: '11px', color: '#b4b2a9', letterSpacing: '0.02em' }}>
+            <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.75)', letterSpacing: '0.02em' }}>
               Stone Busailah LLP · Staff Portal
             </div>
           </div>
@@ -271,13 +293,21 @@ export default function Login() {
       </div>
 
       <style>{`
+        .login-right-panel input::placeholder {
+          color: rgba(255, 255, 255, 0.65);
+        }
         @keyframes spin {
           from { transform: rotate(0deg); }
           to { transform: rotate(360deg); }
         }
         @media (max-width: 700px) {
           .login-left-panel { display: none !important; }
-          .login-right-panel { max-width: 100% !important; flex: 1 1 100% !important; }
+          .login-right-panel {
+            max-width: 100% !important;
+            flex: 1 1 100% !important;
+            padding: 1.25rem !important;
+            min-height: 100dvh;
+          }
         }
       `}</style>
     </div>

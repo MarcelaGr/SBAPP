@@ -1,4 +1,5 @@
 import { getEntitySbNumber, getSbSearchTokens, normalizeSbNumber } from './sb'
+import { getCaseTypeSearchValues } from './caseTypes'
 
 function normalizeText(value) {
   return String(value || '')
@@ -35,6 +36,7 @@ export function matchesSearch(values, query) {
 export function getCaseSearchValues(caseItem) {
   return [
     getEntitySbNumber(caseItem),
+    caseItem?.serial_number,
     caseItem?.clients?.first_name,
     caseItem?.clients?.last_name,
     caseItem?.brief_description,
@@ -42,7 +44,7 @@ export function getCaseSearchValues(caseItem) {
     caseItem?.association_case_number,
     caseItem?.associations?.short_name,
     caseItem?.associations?.name,
-    caseItem?.case_type,
+    getCaseTypeSearchValues(caseItem?.case_type),
     caseItem?.status,
   ]
 }
@@ -50,6 +52,8 @@ export function getCaseSearchValues(caseItem) {
 export function getClientSearchValues(client) {
   return [
     getEntitySbNumber(client),
+    client?.title,
+    client?.serial_number,
     client?.first_name,
     client?.last_name,
     client?.email,

@@ -1,6 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { supabase } from '../supabaseClient'
 import { getTimeslipSearchValues, matchesSearch } from '../lib/search'
+import { FormActions, FormModal, FormStatusMessage, PageNotice } from '../components/FormUi'
+import { EXPENSE_CATEGORIES } from '../lib/expenses'
 
 // ─── NEW / EDIT TIMESLIP FORM ─────────────────────────────────
 function TimeslipForm({ staff, editEntry, onClose, onSaved }) {
@@ -19,7 +21,23 @@ function TimeslipForm({ staff, editEntry, onClose, onSaved }) {
     hours: editEntry ? Math.floor(editEntry.hours) : 0,
     minutes: editEntry ? Math.round((editEntry.hours % 1) * 60) : 0,
     description: editEntry?.description || '',
+    billable: editEntry?.billable !== false ? true : false,
   })
+
+  // Expense tracking
+  const [expenses, setExpenses] = useState([])
+  const [showExpenseForm, setShowExpenseForm] = useState(false)
+  const [expenseForm, setExpenseForm] = useState({
+    title: '',
+    category: 'Court fees',
+    amount: '',
+    expense_date: new Date().toISOString().split('T')[0],
+    notes: '',
+    billable: true,
+  })
+  const [expenseFile, setExpenseFile] = useState(null)
+  const [uploadingExpense, setUploadingExpense] = useState(false)
+  const fileInputRef = useRef()
 
   useEffect(() => {
     if (staff?.role === 'admin') {
@@ -49,6 +67,53 @@ function TimeslipForm({ staff, editEntry, onClose, onSaved }) {
 
   function setField(key, value) { setForm(prev => ({ ...prev, [key]: value })) }
 
+  function setExpenseField(key, value) { setExpenseForm(prev => ({ ...prev, [key]: value })) }
+
+  async function handleExpenseFileSelect(e) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    if (file.size > 10 * 1024 * 1024) { setError('File must be smaller than 10MB'); return }
+    setExpenseFile(file)
+  }
+
+  async function handleAddExpense() {
+    if (!expenseForm.title.trim()) { setError('Please enter an expense title.'); return }
+    if (!expenseForm.amount || parseFloat(expenseForm.amount) <= 0) { setError('Please enter a valid amount.'); return }
+
+    setUploadingExpense(true)
+    let filePath = null
+
+    // Upload file if provided
+    if (expenseFile && selectedCase) {
+      const fileName = `${Date.now()}_${expenseFile.name.replace(/[^\w.-]/g, '')}`
+      const { error: uploadError } = await supabase.storage
+        .from('case-expenses')
+        .upload(`${selectedCase.id}/${fileName}`, expenseFile)
+      
+      if (uploadError) { setError('File upload failed: ' + uploadError.message); setUploadingExpense(false); return }
+      filePath = `case-expenses/${selectedCase.id}/${fileName}`
+    }
+
+    // Add to local expenses array
+    const newExpense = {
+      ...expenseForm,
+      amount: parseFloat(expenseForm.amount),
+      file_path: filePath,
+      file_name: expenseFile?.name,
+      file_size_kb: expenseFile ? Math.ceil(expenseFile.size / 1024) : null,
+    }
+
+    setExpenses([...expenses, newExpense])
+    setExpenseForm({ title: '', category: 'Court fees', amount: '', expense_date: new Date().toISOString().split('T')[0], notes: '', billable: true })
+    setExpenseFile(null)
+    setShowExpenseForm(false)
+    setUploadingExpense(false)
+  }
+
+  function removeExpense(index) {
+    setExpenses(prev => prev.filter((_, i) => i !== index))
+  }
+
   const totalHours = (parseInt(form.hours) || 0) + ((parseInt(form.minutes) || 0) / 60)
 
   async function handleSubmit(e) {
@@ -66,6 +131,7 @@ function TimeslipForm({ staff, editEntry, onClose, onSaved }) {
       entry_date: form.entry_date,
       hours: totalHours,
       description: form.description.trim(),
+      billable: form.billable,
       status: 'pending',
     }
 
@@ -81,6 +147,28 @@ function TimeslipForm({ staff, editEntry, onClose, onSaved }) {
     }
 
     if (dbError) { setError('Error: ' + dbError.message); setSaving(false); return }
+
+    // Save expenses if any
+    if (expenses.length > 0 && data?.id) {
+      const expensePayloads = expenses.map(exp => ({
+        time_entry_id: data.id,
+        case_id: data.case_id,
+        title: exp.title,
+        category: exp.category,
+        amount: exp.amount,
+        expense_date: exp.expense_date,
+        notes: exp.notes,
+        billable: exp.billable,
+        receipt_file_name: exp.file_name || null,
+        receipt_file_path: exp.file_path || null,
+        receipt_file_size_kb: exp.file_size_kb || null,
+        created_by: staff?.id,
+      }))
+
+      const { error: expenseError } = await supabase.from('time_entry_expenses').insert(expensePayloads)
+      if (expenseError) { setError('Error saving expenses: ' + expenseError.message); setSaving(false); return }
+    }
+
     setSaving(false)
     onSaved(data, isEdit)
   }
@@ -90,19 +178,13 @@ function TimeslipForm({ staff, editEntry, onClose, onSaved }) {
   const fieldStyle = { marginBottom: '14px' }
 
   return (
-    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', zIndex: 100, padding: '2rem 1rem', overflowY: 'auto' }}>
-      <div style={{ background: '#fff', borderRadius: '12px', width: '100%', maxWidth: '480px', padding: '1.75rem', border: '0.5px solid #d3d1c7', marginBottom: '2rem' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.25rem' }}>
-          <div>
-            <div style={{ fontSize: '16px', fontWeight: '500', color: '#2c2c2a' }}>{isEdit ? 'Edit timeslip' : 'New timeslip'}</div>
-            <div style={{ fontSize: '12px', color: '#888780', marginTop: '2px' }}>
-              {isEdit ? 'Changes will be resubmitted for admin approval' : 'Submitted as pending — admin must approve before invoicing'}
-            </div>
-          </div>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: '20px', color: '#888780', cursor: 'pointer' }}>✕</button>
-        </div>
-
-        <form onSubmit={handleSubmit}>
+    <FormModal
+      title={isEdit ? 'Edit timeslip' : 'New timeslip'}
+      subtitle={isEdit ? 'Changes will be resubmitted for admin approval' : 'Submitted as pending and reviewed before invoicing'}
+      onClose={onClose}
+      maxWidth="480px"
+    >
+      <form onSubmit={handleSubmit}>
 
           {/* Attorney selector (admin only) */}
           {staff?.role === 'admin' && (
@@ -196,6 +278,54 @@ function TimeslipForm({ staff, editEntry, onClose, onSaved }) {
             </div>
           </div>
 
+          {/* Billable toggle */}
+          <div style={fieldStyle}>
+            <label style={labelStyle}>Billable status <span style={{ color: '#a32d2d' }}>*</span></label>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+              <button
+                type="button"
+                onClick={() => setField('billable', true)}
+                style={{
+                  padding: '10px',
+                  border: '0.5px solid',
+                  borderColor: form.billable ? '#0C447C' : '#b4b2a9',
+                  background: form.billable ? '#E6F1FB' : '#fff',
+                  color: form.billable ? '#0C447C' : '#5f5e5a',
+                  borderRadius: '8px',
+                  fontSize: '13px',
+                  fontWeight: '500',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s',
+                }}
+              >
+                ✓ Billable
+              </button>
+              <button
+                type="button"
+                onClick={() => setField('billable', false)}
+                style={{
+                  padding: '10px',
+                  border: '0.5px solid',
+                  borderColor: !form.billable ? '#A32D2D' : '#b4b2a9',
+                  background: !form.billable ? '#FCEBEB' : '#fff',
+                  color: !form.billable ? '#A32D2D' : '#5f5e5a',
+                  borderRadius: '8px',
+                  fontSize: '13px',
+                  fontWeight: '500',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s',
+                }}
+              >
+                — Non-billable
+              </button>
+            </div>
+            {!form.billable && (
+              <div style={{ marginTop: '6px', padding: '8px 10px', background: '#FEF5F5', border: '0.5px solid #F5D4D4', borderRadius: '6px', fontSize: '12px', color: '#633806' }}>
+                This time will track productivity but won't appear on invoices.
+              </div>
+            )}
+          </div>
+
           {/* Computed amount preview */}
           {selectedCase && totalHours > 0 && (
             <div style={{ background: '#f1efe8', borderRadius: '8px', padding: '10px 12px', marginBottom: '14px', fontSize: '12px', color: '#5f5e5a' }}>
@@ -206,25 +336,157 @@ function TimeslipForm({ staff, editEntry, onClose, onSaved }) {
             </div>
           )}
 
-          {error && (
-            <div style={{ background: '#fcebeb', border: '0.5px solid #f09595', borderRadius: '8px', padding: '8px 12px', fontSize: '12px', color: '#a32d2d', marginBottom: '1rem' }}>
-              {error}
+          {/* Expenses section */}
+          <div style={{ marginTop: '20px', paddingTop: '14px', borderTop: '1px solid #d3d1c7' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+              <label style={labelStyle}>Associated expenses (optional)</label>
+              <button
+                type="button"
+                onClick={() => setShowExpenseForm(!showExpenseForm)}
+                style={{ fontSize: '12px', color: '#185FA5', background: 'none', border: 'none', cursor: 'pointer', fontWeight: '500' }}
+              >
+                {showExpenseForm ? '− Hide' : '+ Add expense'}
+              </button>
             </div>
-          )}
 
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
-            <button type="button" onClick={onClose}
-              style={{ padding: '8px 18px', border: '0.5px solid #d3d1c7', borderRadius: '8px', background: '#fff', fontSize: '13px', cursor: 'pointer', color: '#5f5e5a' }}>
-              Cancel
-            </button>
-            <button type="submit" disabled={saving}
-              style={{ padding: '8px 18px', border: 'none', borderRadius: '8px', background: saving ? '#888' : '#0C447C', color: '#fff', fontSize: '13px', fontWeight: '500', cursor: saving ? 'not-allowed' : 'pointer' }}>
-              {saving ? 'Saving...' : isEdit ? 'Save changes' : 'Submit timeslip'}
-            </button>
+            {showExpenseForm && (
+              <div style={{ background: '#f1efe8', borderRadius: '8px', padding: '12px', marginBottom: '12px' }}>
+                <div style={fieldStyle}>
+                  <label style={labelStyle}>Title <span style={{ color: '#a32d2d' }}>*</span></label>
+                  <input type="text" value={expenseForm.title} onChange={e => setExpenseField('title', e.target.value)}
+                    placeholder="e.g. Court filing fee, mileage..." style={inputStyle} />
+                </div>
+
+                <div style={fieldStyle}>
+                  <label style={labelStyle}>Category <span style={{ color: '#a32d2d' }}>*</span></label>
+                  <select value={expenseForm.category} onChange={e => setExpenseField('category', e.target.value)} style={inputStyle}>
+                    {EXPENSE_CATEGORIES.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                  </select>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '14px' }}>
+                  <div style={fieldStyle}>
+                    <label style={labelStyle}>Amount <span style={{ color: '#a32d2d' }}>*</span></label>
+                    <input type="number" value={expenseForm.amount} onChange={e => setExpenseField('amount', e.target.value)}
+                      placeholder="0.00" step="0.01" min="0" style={inputStyle} />
+                  </div>
+                  <div style={fieldStyle}>
+                    <label style={labelStyle}>Date <span style={{ color: '#a32d2d' }}>*</span></label>
+                    <input type="date" value={expenseForm.expense_date} onChange={e => setExpenseField('expense_date', e.target.value)} style={inputStyle} />
+                  </div>
+                </div>
+
+                <div style={fieldStyle}>
+                  <label style={labelStyle}>Notes</label>
+                  <textarea value={expenseForm.notes} onChange={e => setExpenseField('notes', e.target.value)}
+                    placeholder="Additional details..." rows={2} style={{ ...inputStyle, resize: 'vertical', minHeight: '50px' }} />
+                </div>
+
+                <div style={fieldStyle}>
+                  <label style={labelStyle}>Billable <span style={{ color: '#a32d2d' }}>*</span></label>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                    <button
+                      type="button"
+                      onClick={() => setExpenseField('billable', true)}
+                      style={{
+                        padding: '8px',
+                        border: '0.5px solid',
+                        borderColor: expenseForm.billable ? '#0C447C' : '#b4b2a9',
+                        background: expenseForm.billable ? '#E6F1FB' : '#fff',
+                        color: expenseForm.billable ? '#0C447C' : '#5f5e5a',
+                        borderRadius: '6px',
+                        fontSize: '12px',
+                        fontWeight: '500',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      ✓ Billable
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setExpenseField('billable', false)}
+                      style={{
+                        padding: '8px',
+                        border: '0.5px solid',
+                        borderColor: !expenseForm.billable ? '#A32D2D' : '#b4b2a9',
+                        background: !expenseForm.billable ? '#FCEBEB' : '#fff',
+                        color: !expenseForm.billable ? '#A32D2D' : '#5f5e5a',
+                        borderRadius: '6px',
+                        fontSize: '12px',
+                        fontWeight: '500',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      — Non-billable
+                    </button>
+                  </div>
+                </div>
+
+                <div style={fieldStyle}>
+                  <label style={labelStyle}>Receipt / Proof (optional)</label>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      style={{ padding: '8px 12px', border: '0.5px solid #d3d1c7', borderRadius: '6px', background: '#fff', fontSize: '12px', cursor: 'pointer', color: '#5f5e5a' }}
+                    >
+                      {expenseFile ? `✓ ${expenseFile.name}` : 'Choose file'}
+                    </button>
+                  </div>
+                  <input ref={fileInputRef} type="file" onChange={handleExpenseFileSelect} style={{ display: 'none' }} accept=".pdf,.doc,.docx,.jpg,.jpeg,.png" />
+                  <div style={{ fontSize: '11px', color: '#888780', marginTop: '4px' }}>Max 10MB (PDF, DOC, JPG, PNG)</div>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                  <button
+                    type="button"
+                    onClick={handleAddExpense}
+                    disabled={uploadingExpense}
+                    style={{ padding: '8px 12px', border: 'none', borderRadius: '6px', background: '#eaf3de', color: '#27500a', fontSize: '12px', fontWeight: '500', cursor: uploadingExpense ? 'not-allowed' : 'pointer', opacity: uploadingExpense ? 0.6 : 1 }}
+                  >
+                    {uploadingExpense ? 'Uploading...' : 'Add expense'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setShowExpenseForm(false); setExpenseFile(null) }}
+                    style={{ padding: '8px 12px', border: '0.5px solid #d3d1c7', borderRadius: '6px', background: '#fff', color: '#888780', fontSize: '12px', cursor: 'pointer' }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Expenses list */}
+            {expenses.length > 0 && (
+              <div style={{ background: '#faf9f7', borderRadius: '8px', padding: '12px', marginBottom: '12px' }}>
+                {expenses.map((exp, idx) => (
+                  <div key={idx} style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', padding: '9px', background: '#fff', borderRadius: '6px', marginBottom: idx < expenses.length - 1 ? '8px' : '0px', border: '0.5px solid #e8e6df' }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: '12px', fontWeight: '500', color: '#2c2c2a' }}>{exp.title}</div>
+                      <div style={{ fontSize: '11px', color: '#888780', marginTop: '2px' }}>
+                        {exp.category} • ${exp.amount.toFixed(2)} • {new Date(exp.expense_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                        {!exp.billable && <span style={{ color: '#791F1F', marginLeft: '8px' }}>• Non-billable</span>}
+                        {exp.file_name && <span style={{ color: '#185FA5', marginLeft: '8px' }}>• 📎 {exp.file_name}</span>}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => removeExpense(idx)}
+                      style={{ background: 'none', border: 'none', color: '#888780', cursor: 'pointer', fontSize: '16px', padding: '2px 8px' }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
-        </form>
-      </div>
-    </div>
+
+        <FormStatusMessage message={error} />
+        <FormActions onCancel={onClose} saving={saving} saveLabel="Save timeslip" />
+      </form>
+    </FormModal>
   )
 }
 
@@ -239,6 +501,7 @@ export default function Timesheets({ staff }) {
   const [showForm, setShowForm] = useState(false)
   const [editEntry, setEditEntry] = useState(null)
   const [selected, setSelected] = useState([])
+  const [notice, setNotice] = useState(null)
 
   const isAdmin = staff?.role === 'admin'
 
@@ -271,12 +534,17 @@ export default function Timesheets({ staff }) {
   }
 
   async function updateStatus(id, status) {
-    await supabase.from('time_entries').update({
+    const { error } = await supabase.from('time_entries').update({
       status,
       approved_by: status === 'approved' ? staff?.id : null,
       approved_at: status === 'approved' ? new Date().toISOString() : null,
     }).eq('id', id)
+    if (error) {
+      setNotice({ type: 'error', message: `Unable to update timeslip: ${error.message}` })
+      return
+    }
     setEntries(prev => prev.map(e => e.id === id ? { ...e, status } : e))
+    setNotice({ type: 'success', message: `Timeslip marked as ${status}.` })
   }
 
   async function bulkApprove() {
@@ -333,6 +601,7 @@ export default function Timesheets({ staff }) {
 
   return (
     <div style={{ padding: '1.25rem', fontFamily: 'sans-serif' }}>
+      <PageNotice notice={notice} onDismiss={() => setNotice(null)} />
 
       {/* Page header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem', flexWrap: 'wrap', gap: '8px' }}>
@@ -420,7 +689,7 @@ export default function Timesheets({ staff }) {
                         onChange={toggleSelectAll} style={{ accentColor: '#0C447C', cursor: 'pointer' }} />
                     </th>
                   )}
-                  {['Date', 'Attorney', 'Case', 'Description', 'Hours', 'Rate', 'Amount', 'Status', ''].map(h => (
+                  {['Date', 'Attorney', 'Case', 'Description', 'Hours', 'Rate', 'Amount', 'Billable', 'Status', ''].map(h => (
                     <th key={h} style={{ textAlign: 'left', padding: '7px 10px', fontSize: '11px', fontWeight: '500', color: '#888780', borderBottom: '0.5px solid #d3d1c7', textTransform: 'uppercase', letterSpacing: '0.04em', whiteSpace: 'nowrap' }}>{h}</th>
                   ))}
                 </tr>
@@ -455,6 +724,17 @@ export default function Timesheets({ staff }) {
                     </td>
                     <td style={{ padding: '9px 10px', borderBottom: '0.5px solid #f1efe8', fontWeight: '500' }}>
                       {entry.computed_amount ? `$${entry.computed_amount.toFixed(2)}` : '—'}
+                    </td>
+                    <td style={{ padding: '9px 10px', borderBottom: '0.5px solid #f1efe8', fontSize: '12px' }}>
+                      {entry.billable !== false ? (
+                        <span style={{ background: '#eaf3de', color: '#27500a', padding: '2px 8px', borderRadius: '20px', fontSize: '11px', fontWeight: '500' }}>
+                          Billable
+                        </span>
+                      ) : (
+                        <span style={{ background: '#FCEBEB', color: '#791F1F', padding: '2px 8px', borderRadius: '20px', fontSize: '11px', fontWeight: '500' }}>
+                          Non-billable
+                        </span>
+                      )}
                     </td>
                     <td style={{ padding: '9px 10px', borderBottom: '0.5px solid #f1efe8' }}>{statusBadge(entry.status)}</td>
                     <td style={{ padding: '9px 10px', borderBottom: '0.5px solid #f1efe8' }}>
@@ -518,6 +798,7 @@ export default function Timesheets({ staff }) {
                   <td style={{ padding: '9px 10px', fontSize: '13px', fontWeight: '500', color: '#2c2c2a' }}>
                     {totalAmt > 0 ? `$${totalAmt.toFixed(2)}` : '—'}
                   </td>
+                  <td />
                   <td colSpan={2} />
                 </tr>
               </tbody>
@@ -534,8 +815,10 @@ export default function Timesheets({ staff }) {
           onSaved={(saved, wasEdit) => {
             if (wasEdit) {
               setEntries(prev => prev.map(e => e.id === saved.id ? saved : e))
+              setNotice({ type: 'success', message: 'Timeslip saved successfully.' })
             } else {
               setEntries(prev => [saved, ...prev])
+              setNotice({ type: 'success', message: 'Timeslip created successfully.' })
             }
             setShowForm(false)
             setEditEntry(null)

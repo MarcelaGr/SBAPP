@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../supabaseClient'
+import { PageNotice } from '../components/FormUi'
 
 // ─── ASSOCIATIONS TAB ─────────────────────────────────────────
 function AssociationsTab() {
@@ -826,8 +827,126 @@ function ImportTab() {
   )
 }
 
+function AuditLogTab() {
+  const [entries, setEntries] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [search, setSearch] = useState('')
+  const [notice, setNotice] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function fetchAuditLog() {
+      setLoading(true)
+      const { data, error } = await supabase
+        .from('audit_log')
+        .select('*')
+        .limit(250)
+
+      if (cancelled) return
+
+      if (error) {
+        setNotice({ type: 'error', message: `Unable to load audit log: ${error.message}` })
+        setEntries([])
+        setLoading(false)
+        return
+      }
+
+      const normalized = (data || []).map(item => ({
+        id: item.id,
+        entity_type: item.entity_type ?? item.table_name ?? item.entity_name ?? item.entity ?? 'unknown',
+        entity_id: item.entity_id ?? item.record_id ?? item.id ?? '',
+        action: item.action ?? item.event ?? item.operation ?? 'update',
+        timestamp: item.timestamp ?? item.created_at ?? item.logged_at ?? item.inserted_at ?? new Date().toISOString(),
+        user_id: item.user_id ?? item.actor_id ?? null,
+      }))
+
+      normalized.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+
+      const userIds = [...new Set(normalized.map(item => item.user_id).filter(Boolean))]
+      let staffMap = {}
+
+      if (userIds.length > 0) {
+        const { data: staffRows } = await supabase
+          .from('staff')
+          .select('id, full_name, initials')
+          .in('id', userIds)
+
+        staffMap = Object.fromEntries((staffRows || []).map(row => [row.id, row]))
+      }
+
+      const enriched = normalized.map(entry => ({
+        ...entry,
+        staff: entry.user_id ? staffMap[entry.user_id] || null : null,
+      }))
+
+      setEntries(enriched)
+      setLoading(false)
+    }
+
+    fetchAuditLog()
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const filtered = entries.filter(entry => {
+    const haystack = [entry.entity_type, entry.entity_id, entry.action, entry.staff?.full_name, entry.staff?.initials, entry.user_id].filter(Boolean).join(' ').toLowerCase()
+    return haystack.includes(search.trim().toLowerCase())
+  })
+
+  return (
+    <div>
+      <PageNotice notice={notice} onDismiss={() => setNotice(null)} />
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', marginBottom: '1rem', flexWrap: 'wrap' }}>
+        <div style={{ fontSize: '13px', color: '#888780' }}>Read-only history of create, update, and delete activity</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', background: '#f1efe8', border: '0.5px solid #d3d1c7', borderRadius: '8px', padding: '5px 10px' }}>
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#888" strokeWidth="1.5"><circle cx="7" cy="7" r="5"/><path d="M11 11l3 3"/></svg>
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search entity, action, user..." style={{ border: 'none', background: 'transparent', fontSize: '13px', outline: 'none', width: '220px', color: '#2c2c2a' }} />
+        </div>
+      </div>
+
+      {loading ? (
+        <div style={{ padding: '2rem', textAlign: 'center', color: '#888780', fontSize: '13px' }}>Loading audit log...</div>
+      ) : filtered.length === 0 ? (
+        <div style={{ padding: '2rem', textAlign: 'center', color: '#888780', fontSize: '13px' }}>No audit entries found.</div>
+      ) : (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px', minWidth: '720px' }}>
+            <thead>
+              <tr>
+                {['Timestamp', 'Action', 'Entity', 'Record ID', 'User'].map(header => (
+                  <th key={header} style={{ textAlign: 'left', padding: '7px 10px', fontSize: '11px', fontWeight: '500', color: '#888780', borderBottom: '0.5px solid #d3d1c7', textTransform: 'uppercase', letterSpacing: '0.04em', whiteSpace: 'nowrap' }}>{header}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map(entry => (
+                <tr key={entry.id}>
+                  <td style={{ padding: '9px 10px', borderBottom: '0.5px solid #f1efe8', color: '#5f5e5a', whiteSpace: 'nowrap' }}>
+                    {new Date(entry.timestamp).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}
+                  </td>
+                  <td style={{ padding: '9px 10px', borderBottom: '0.5px solid #f1efe8' }}>
+                    <span style={{ background: entry.action === 'create' ? '#eaf3de' : entry.action === 'update' ? '#E6F1FB' : '#fcebeb', color: entry.action === 'create' ? '#27500a' : entry.action === 'update' ? '#0C447C' : '#791F1F', padding: '2px 8px', borderRadius: '20px', fontSize: '11px', fontWeight: '500' }}>
+                      {entry.action}
+                    </span>
+                  </td>
+                  <td style={{ padding: '9px 10px', borderBottom: '0.5px solid #f1efe8', color: '#2c2c2a', fontWeight: '500' }}>{entry.entity_type}</td>
+                  <td style={{ padding: '9px 10px', borderBottom: '0.5px solid #f1efe8', color: '#5f5e5a', fontFamily: 'monospace', fontSize: '12px' }}>{entry.entity_id}</td>
+                  <td style={{ padding: '9px 10px', borderBottom: '0.5px solid #f1efe8', color: '#5f5e5a' }}>{entry.staff?.full_name || entry.user_id || 'System'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── SETTINGS MAIN ────────────────────────────────────────────
-export default function Settings({ staff }) {
+export default function Settings() {
   const [activeTab, setActiveTab] = useState('associations')
 
   const tabs = [
@@ -835,6 +954,7 @@ export default function Settings({ staff }) {
     { key: 'staff', label: 'Team members' },
     { key: 'rates', label: 'Rate table' },
     { key: 'import', label: 'Import data' },
+    { key: 'audit', label: 'Audit log' },
   ]
 
   return (
@@ -857,6 +977,7 @@ export default function Settings({ staff }) {
         {activeTab === 'staff' && <StaffTab />}
         {activeTab === 'rates' && <RateTableTab />}
         {activeTab === 'import' && <ImportTab />}
+        {activeTab === 'audit' && <AuditLogTab />}
       </div>
     </div>
   )

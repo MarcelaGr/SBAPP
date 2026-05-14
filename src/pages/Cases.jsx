@@ -2,7 +2,61 @@ import { useEffect, useState, useRef } from 'react'
 import { supabase } from '../supabaseClient'
 import NewCaseForm from './NewCaseForm'
 import { getCaseSearchValues, matchesSearch } from '../lib/search'
-import { normalizeSbNumber } from '../lib/sb'
+import { PRIVATE_CASE_TYPES, normalizeCaseType } from '../lib/caseTypes'
+import { PageNotice } from '../components/FormUi'
+
+const DOCUMENT_FOLDERS = [
+  'Audio',
+  'Authorization',
+  'Billing',
+  'Correspondense',
+  'Drafts',
+  'Notes',
+  'Pleadings',
+  'Scans',
+  'Status Reports',
+]
+
+function getFolderSlug(folder) {
+  return folder.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')
+}
+
+function getDocumentFolder(doc) {
+  if (DOCUMENT_FOLDERS.includes(doc.folder)) return doc.folder
+  if (DOCUMENT_FOLDERS.includes(doc.folder_category)) return doc.folder_category
+  if (DOCUMENT_FOLDERS.includes(doc.category)) return doc.category
+
+  const path = doc.file_path || ''
+  const match = DOCUMENT_FOLDERS.find(folder => path.includes(`/${getFolderSlug(folder)}/`))
+  return match || 'Notes'
+}
+
+function getStorageFileName(fileName) {
+  return String(fileName || 'document').replace(/[^\w.\- ]+/g, '').replace(/\s+/g, '_')
+}
+
+function getDefaultTrustForm() {
+  return {
+    transaction_type: 'deposit',
+    amount: '',
+    transaction_date: new Date().toISOString().split('T')[0],
+    invoice_id: '',
+    notes: '',
+  }
+}
+
+function isSchemaCacheMissing(error) {
+  const message = error?.message || ''
+  return error?.code === 'PGRST205' || error?.code === 'PGRST202' || message.includes('schema cache')
+}
+
+function isTrustEligibleCase(caseRecord) {
+  return caseRecord?.case_category === 'private' && PRIVATE_CASE_TYPES.includes(normalizeCaseType(caseRecord.case_type))
+}
+
+function getTrustTransactionResult(data) {
+  return Array.isArray(data) ? data[0] : data
+}
 
 export default function Cases({ staff, isAttorney }) {
   const [cases, setCases] = useState([])
@@ -15,11 +69,16 @@ export default function Cases({ staff, isAttorney }) {
   const [deleting, setDeleting] = useState(false)
   const [activeTab, setActiveTab] = useState('overview')
   const [showNewCase, setShowNewCase] = useState(false)
+  const [showEditCase, setShowEditCase] = useState(false)
+  const [notice, setNotice] = useState(null)
 
   // Documents state
   const [documents, setDocuments] = useState([])
   const [docsLoading, setDocsLoading] = useState(false)
   const [uploading, setUploading] = useState(false)
+  const [uploadingFolder, setUploadingFolder] = useState('')
+  const [pendingDocumentFolder, setPendingDocumentFolder] = useState('Notes')
+  const [expandedDocumentFolders, setExpandedDocumentFolders] = useState(() => new Set(DOCUMENT_FOLDERS))
   const fileInputRef = useRef()
 
   // Comments/chat state
@@ -38,6 +97,13 @@ export default function Cases({ staff, isAttorney }) {
   const reportFileRef = useRef()
 
   const isAdmin = staff?.role === 'admin'
+  const [trustAccount, setTrustAccount] = useState(null)
+  const [trustTransactions, setTrustTransactions] = useState([])
+  const [trustLoading, setTrustLoading] = useState(false)
+  const [trustInvoices, setTrustInvoices] = useState([])
+  const [savingTrust, setSavingTrust] = useState(false)
+  const [trustError, setTrustError] = useState('')
+  const [trustForm, setTrustForm] = useState(getDefaultTrustForm)
 
   useEffect(() => { fetchCases() }, [])
 
@@ -46,6 +112,15 @@ export default function Cases({ staff, isAttorney }) {
       fetchDocuments(selectedCase.id)
       fetchComments(selectedCase.id)
       fetchReports(selectedCase.id)
+      if (isTrustEligibleCase(selectedCase)) {
+        fetchTrustData(selectedCase)
+      } else {
+        setTrustAccount(null)
+        setTrustTransactions([])
+        setTrustInvoices([])
+        setTrustError('')
+        setActiveTab(prev => prev === 'trust_account' ? 'overview' : prev)
+      }
     }
   }, [selectedCase])
 
@@ -69,6 +144,23 @@ export default function Cases({ staff, isAttorney }) {
     setDocsLoading(false)
   }
 
+  function toggleDocumentFolder(folder) {
+    setExpandedDocumentFolders(prev => {
+      const next = new Set(prev)
+      if (next.has(folder)) {
+        next.delete(folder)
+      } else {
+        next.add(folder)
+      }
+      return next
+    })
+  }
+
+  function chooseDocumentFolder(folder) {
+    setPendingDocumentFolder(folder)
+    fileInputRef.current?.click()
+  }
+
   async function fetchComments(caseId) {
     setCommentsLoading(true)
     const { data } = await supabase.from('comments').select('*, staff:author_id(full_name, initials, role)').eq('case_id', caseId).order('created_at', { ascending: true })
@@ -87,18 +179,177 @@ export default function Cases({ staff, isAttorney }) {
     setReportsLoading(false)
   }
 
+  async function fetchTrustData(caseRecord) {
+    if (!caseRecord?.id || !isTrustEligibleCase(caseRecord)) return
+    setTrustLoading(true)
+    setTrustError('')
+
+    const [{ data: accountData, error: accountError }, { data: transactionData, error: transactionError }, { data: invoiceData, error: invoiceError }] = await Promise.all([
+      supabase
+        .from('trust_accounts')
+        .select('*')
+        .eq('case_id', caseRecord.id)
+        .maybeSingle(),
+      supabase
+        .from('trust_transactions')
+        .select('*, staff:performed_by(full_name, initials), invoices(invoice_number)')
+        .eq('case_id', caseRecord.id)
+        .order('created_at', { ascending: false }),
+      supabase
+        .from('invoices')
+        .select('id, invoice_number, status, total_due')
+        .eq('case_id', caseRecord.id)
+        .in('status', ['draft', 'sent'])
+        .order('issued_at', { ascending: false }),
+    ])
+
+    const trustLoadError = accountError || transactionError || invoiceError
+    if (trustLoadError) {
+      setTrustError(isSchemaCacheMissing(trustLoadError)
+        ? 'Trust account tables/functions are not installed in the database yet. Apply the trust_account_management migration first.'
+        : `Unable to load trust data: ${trustLoadError.message}`)
+    }
+
+    setTrustAccount(accountData || null)
+    setTrustTransactions(transactionData || [])
+    setTrustInvoices(invoiceData || [])
+    setTrustLoading(false)
+  }
+
+  function setTrustField(key, value) {
+    setTrustForm(prev => ({ ...prev, [key]: value }))
+  }
+
+  async function saveTrustTransaction(e) {
+    e.preventDefault()
+    if (!selectedCase) return
+
+    setTrustError('')
+    if (!isTrustEligibleCase(selectedCase)) {
+      setTrustError('Trust accounts are only available for private TRST and FL-TRST cases.')
+      return
+    }
+
+    const amount = Number(trustForm.amount)
+    const resolvedClientId = selectedCase.client_id || selectedCase.clients?.id
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setTrustError('Please enter a valid amount greater than zero.')
+      return
+    }
+    if (!trustForm.transaction_date) {
+      setTrustError('Please select a transaction date.')
+      return
+    }
+    if (trustForm.transaction_type === 'invoice_payment' && !trustForm.invoice_id) {
+      setTrustError('Please choose an invoice to apply trust funds.')
+      return
+    }
+    if (!resolvedClientId) {
+      setTrustError('Case is missing linked client. Please refresh and try again.')
+      return
+    }
+
+    if (trustForm.transaction_type !== 'deposit') {
+      const currentBalance = Number(trustAccount?.current_balance || 0)
+      if (amount > currentBalance) {
+        setTrustError(`Insufficient trust balance. Available: $${currentBalance.toFixed(2)}`)
+        return
+      }
+    }
+
+    setSavingTrust(true)
+    try {
+      let savedTransaction = null
+
+      if (trustForm.transaction_type === 'invoice_payment') {
+        const { data, error } = await supabase.rpc('apply_trust_to_invoice', {
+          p_invoice_id: trustForm.invoice_id,
+          p_amount: amount,
+          p_transaction_date: trustForm.transaction_date,
+          p_notes: trustForm.notes || null,
+          p_performed_by: staff?.id || null,
+        })
+        if (error) throw error
+        savedTransaction = getTrustTransactionResult(data)
+      } else {
+        const { data: txResult, error } = await supabase.rpc('record_trust_transaction', {
+          p_case_id: selectedCase.id,
+          p_client_id: resolvedClientId,
+          p_transaction_type: trustForm.transaction_type,
+          p_amount: amount,
+          p_transaction_date: trustForm.transaction_date,
+          p_notes: trustForm.notes || null,
+          p_performed_by: staff?.id || null,
+          p_invoice_id: null,
+        })
+        if (error) throw error
+        savedTransaction = getTrustTransactionResult(txResult)
+      }
+
+      setTrustForm(getDefaultTrustForm())
+      if (savedTransaction) {
+        setTrustTransactions(prev => [savedTransaction, ...prev])
+        setTrustAccount(prev => ({
+          ...(prev || {}),
+          id: savedTransaction.trust_account_id || prev?.id,
+          current_balance: savedTransaction.running_balance,
+        }))
+      }
+      await fetchTrustData(selectedCase)
+      setNotice({ type: 'success', message: 'Trust transaction recorded.' })
+    } catch (error) {
+      setTrustError(isSchemaCacheMissing(error)
+        ? 'Trust account tables/functions are not installed in the database yet. Apply the trust_account_management migration first.'
+        : `Trust transaction failed: ${error.message || 'Unknown error'}`)
+    } finally {
+      setSavingTrust(false)
+    }
+  }
+
   async function handleFileUpload(e) {
     const file = e.target.files[0]
     if (!file || !selectedCase) return
+    const folder = DOCUMENT_FOLDERS.includes(pendingDocumentFolder) ? pendingDocumentFolder : 'Notes'
+    const duplicate = documents.some(doc => getDocumentFolder(doc) === folder && doc.file_name === file.name)
+    if (duplicate) {
+      setNotice({ type: 'error', message: `${file.name} already exists in ${folder}. Rename the file or delete the existing upload first.` })
+      e.target.value = ''
+      return
+    }
+
     setUploading(true)
-    const filePath = `cases/${selectedCase.id}/${Date.now()}_${file.name}`
+    setUploadingFolder(folder)
+    const filePath = `cases/${selectedCase.id}/${getFolderSlug(folder)}/${Date.now()}_${getStorageFileName(file.name)}`
     const { error: uploadError } = await supabase.storage.from('documents').upload(filePath, file)
     if (!uploadError) {
-      await supabase.from('documents').insert({ case_id: selectedCase.id, uploaded_by: staff.id, file_name: file.name, file_path: filePath, file_size_kb: Math.round(file.size / 1024) })
-      fetchDocuments(selectedCase.id)
+      const documentData = {
+        case_id: selectedCase.id,
+        uploaded_by: staff.id,
+        file_name: file.name,
+        file_path: filePath,
+        file_size_kb: Math.round(file.size / 1024),
+        folder,
+      }
+      let insertResult = await supabase.from('documents').insert(documentData)
+
+      if (insertResult.error && insertResult.error.message?.includes("'folder' column")) {
+        const legacyDocumentData = { ...documentData }
+        delete legacyDocumentData.folder
+        insertResult = await supabase.from('documents').insert(legacyDocumentData)
+      }
+
+      if (insertResult.error) {
+        setNotice({ type: 'error', message: `Document uploaded, but the record could not be saved: ${insertResult.error.message}` })
+      } else {
+        fetchDocuments(selectedCase.id)
+      }
+    } else {
+      setNotice({ type: 'error', message: `Unable to upload document: ${uploadError.message}` })
     }
     setUploading(false)
-    fileInputRef.current.value = ''
+    setUploadingFolder('')
+    e.target.value = ''
   }
 
   async function downloadDocument(doc) {
@@ -160,10 +411,17 @@ export default function Cases({ staff, isAttorney }) {
 
   async function deleteCase(id) {
     setDeleting(true)
-    await supabase.from('cases').delete().eq('id', id)
+    const caseToDelete = cases.find(c => c.id === id)
+    const { error } = await supabase.from('cases').delete().eq('id', id)
+    if (error) {
+      setNotice({ type: 'error', message: `Unable to delete case: ${error.message}` })
+      setDeleting(false)
+      return
+    }
     setCases(cases.filter(c => c.id !== id))
     setShowDeleteConfirm(null)
     setSelectedCase(null)
+    setNotice({ type: 'success', message: `${caseToDelete?.sb_number || 'Case'} was deleted.` })
     setDeleting(false)
   }
 
@@ -173,15 +431,6 @@ export default function Cases({ staff, isAttorney }) {
     const matchCat = categoryFilter === 'all' || c.case_category === categoryFilter
     return matchQ && matchStatus && matchCat
   })
-
-  async function updateCaseSbNumber(caseId, nextSbNumber) {
-    const normalized = normalizeSbNumber(nextSbNumber)
-    if (!normalized) return
-
-    await supabase.from('cases').update({ sb_number: normalized }).eq('id', caseId)
-    setCases(prev => prev.map(item => item.id === caseId ? { ...item, sb_number: normalized } : item))
-    setSelectedCase(prev => prev?.id === caseId ? { ...prev, sb_number: normalized } : prev)
-  }
 
   const statusBadge = (status) => {
     const styles = { active: { background: '#eaf3de', color: '#27500a' }, pending: { background: '#faeeda', color: '#633806' }, closed: { background: '#f1efe8', color: '#5f5e5a' } }
@@ -218,10 +467,17 @@ export default function Cases({ staff, isAttorney }) {
   if (selectedCase) {
     const c = selectedCase
     const isMine = (authorId) => authorId === staff?.id
+    const showTrustAccount = isTrustEligibleCase(c)
     const tabs = ['Overview', 'Status reports', 'Documents', 'Chat']
+    if (showTrustAccount) tabs.splice(2, 0, 'Trust account')
+    const documentsByFolder = DOCUMENT_FOLDERS.reduce((grouped, folder) => {
+      grouped[folder] = documents.filter(doc => getDocumentFolder(doc) === folder)
+      return grouped
+    }, {})
 
     return (
       <div style={{ padding: '1.25rem', fontFamily: 'sans-serif', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+        <PageNotice notice={notice} onDismiss={() => setNotice(null)} />
 
         {/* Back + actions */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
@@ -236,7 +492,7 @@ export default function Cases({ staff, isAttorney }) {
                 Delete
               </button>
             )}
-            <button onClick={() => alert('Edit form coming soon!')}
+            <button onClick={() => setShowEditCase(true)}
               style={{ padding: '6px 14px', background: '#0C447C', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '12px', cursor: 'pointer' }}>
               Edit case
             </button>
@@ -252,30 +508,22 @@ export default function Cases({ staff, isAttorney }) {
             {c.brief_description || '—'} ·
             {c.case_category === 'association'
               ? <span style={{ background: '#E6F1FB', color: '#0C447C', padding: '2px 8px', borderRadius: '20px', fontSize: '11px', fontWeight: '500' }}>{c.associations?.short_name}</span>
-              : <span style={{ background: '#EEEDFE', color: '#3C3489', padding: '2px 8px', borderRadius: '20px', fontSize: '11px', fontWeight: '500' }}>{c.case_type || 'Private'}</span>
+              : <span style={{ background: '#EEEDFE', color: '#3C3489', padding: '2px 8px', borderRadius: '20px', fontSize: '11px', fontWeight: '500' }}>{normalizeCaseType(c.case_type) || 'Private'}</span>
             }
           </div>
-          <div style={{ display: 'flex', gap: '1.5rem', flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', gap: '1.5rem', flexWrap: 'wrap' }}>
             {[
               { label: 'Assoc. case no.', value: c.association_case_number || '—' },
               { label: 'Opened', value: formatDate(c.opened_at) },
               { label: 'Billing', value: c.billing_type === 'hourly' ? `Hourly${c.private_hourly_rate ? ' · $' + c.private_hourly_rate + '/hr' : ''}` : `Flat fee${c.flat_fee_amount ? ' · $' + c.flat_fee_amount : ''}` },
+              { label: 'Employee no.', value: c.serial_number || '—' },
+              { label: 'SB file no.', value: c.sb_number || '—' },
             ].map(item => (
               <div key={item.label} style={{ fontSize: '12px' }}>
                 <span style={{ color: '#888780' }}>{item.label} </span>
                 <span style={{ color: '#2c2c2a', fontWeight: '500' }}>{item.value}</span>
               </div>
             ))}
-            <div style={{ fontSize: '12px', minWidth: '220px' }}>
-              <span style={{ color: '#888780', display: 'block', marginBottom: '4px' }}>SB file no.</span>
-              <input
-                type="text"
-                value={c.sb_number || ''}
-                onChange={e => setSelectedCase(prev => ({ ...prev, sb_number: e.target.value }))}
-                onBlur={e => updateCaseSbNumber(c.id, e.target.value)}
-                style={{ width: '100%', padding: '6px 8px', border: '0.5px solid #d3d1c7', borderRadius: '8px', fontSize: '12px', color: '#185FA5', fontWeight: '500' }}
-              />
-            </div>
           </div>
         </div>
 
@@ -292,6 +540,9 @@ export default function Cases({ staff, isAttorney }) {
               )}
               {tab === 'Documents' && documents.length > 0 && (
                 <span style={{ marginLeft: '5px', background: '#E6F1FB', color: '#0C447C', borderRadius: '20px', fontSize: '10px', padding: '1px 6px', fontWeight: '500' }}>{documents.length}</span>
+              )}
+              {tab === 'Trust account' && showTrustAccount && trustTransactions.length > 0 && (
+                <span style={{ marginLeft: '5px', background: '#EAF3DE', color: '#27500a', borderRadius: '20px', fontSize: '10px', padding: '1px 6px', fontWeight: '500' }}>{trustTransactions.length}</span>
               )}
               {tab === 'Chat' && comments.length > 0 && (
                 <span style={{ marginLeft: '5px', background: '#E6F1FB', color: '#0C447C', borderRadius: '20px', fontSize: '10px', padding: '1px 6px', fontWeight: '500' }}>{comments.length}</span>
@@ -313,7 +564,9 @@ export default function Cases({ staff, isAttorney }) {
                     { label: 'Client', value: `${c.clients?.first_name} ${c.clients?.last_name}` },
                     { label: 'Email', value: c.clients?.email || '—' },
                     { label: 'Phone', value: c.clients?.phone || '—' },
-                    { label: 'Association', value: c.associations?.name || (c.case_type || 'Private') },
+                    { label: 'Association', value: c.associations?.name || (normalizeCaseType(c.case_type) || 'Private') },
+                    { label: 'Employee No.', value: c.serial_number || '—' },
+                    { label: 'SB file no.', value: c.sb_number || '—' },
                     { label: 'Assoc. case no.', value: c.association_case_number || '—' },
                     { label: 'Status', value: c.status },
                     { label: 'Opened', value: formatDate(c.opened_at) },
@@ -494,39 +747,136 @@ export default function Cases({ staff, isAttorney }) {
           {/* ── DOCUMENTS TAB ── */}
           {activeTab === 'documents' && (
             <div>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
-                <div style={{ fontSize: '13px', color: '#888780' }}>{documents.length} document{documents.length !== 1 ? 's' : ''}</div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem', gap: '12px', flexWrap: 'wrap' }}>
                 <div>
-                  <input type="file" ref={fileInputRef} onChange={handleFileUpload} style={{ display: 'none' }} />
-                  <button onClick={() => fileInputRef.current.click()} disabled={uploading}
-                    style={{ padding: '6px 14px', background: '#0C447C', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '12px', cursor: 'pointer' }}>
-                    {uploading ? 'Uploading...' : '+ Upload document'}
-                  </button>
+                  <div style={{ fontSize: '13px', color: '#2c2c2a', fontWeight: '500' }}>Documents</div>
+                  <div style={{ fontSize: '12px', color: '#888780', marginTop: '2px' }}>{documents.length} document{documents.length !== 1 ? 's' : ''} across {DOCUMENT_FOLDERS.length} folders</div>
                 </div>
+                <input type="file" ref={fileInputRef} onChange={handleFileUpload} style={{ display: 'none' }} />
               </div>
               {docsLoading ? (
                 <div style={{ textAlign: 'center', padding: '2rem', color: '#888', fontSize: '13px' }}>Loading documents...</div>
-              ) : documents.length === 0 ? (
-                <div style={{ textAlign: 'center', padding: '3rem', color: '#b4b2a9', fontSize: '13px' }}>
-                  <div style={{ fontSize: '32px', marginBottom: '8px' }}>📄</div>
-                  No documents uploaded yet.
-                </div>
               ) : (
-                documents.map(doc => (
-                  <div key={doc.id} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 0', borderBottom: '0.5px solid #f1efe8' }}>
-                    <div style={{ width: '36px', height: '36px', background: '#E6F1FB', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#185FA5" strokeWidth="1.5"><rect x="3" y="1" width="10" height="14" rx="1.5"/><path d="M5 5h6M5 8h6M5 11h4"/></svg>
-                    </div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: '13px', fontWeight: '500', color: '#2c2c2a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{doc.file_name}</div>
-                      <div style={{ fontSize: '11px', color: '#888780', marginTop: '2px' }}>
-                        Uploaded {formatDate(doc.created_at)} · {doc.staff?.initials} {doc.file_size_kb ? `· ${formatFileSize(doc.file_size_kb)}` : ''}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {DOCUMENT_FOLDERS.map(folder => {
+                    const folderDocuments = documentsByFolder[folder] || []
+                    const expanded = expandedDocumentFolders.has(folder)
+                    const isUploadingHere = uploading && uploadingFolder === folder
+
+                    return (
+                      <div key={folder} style={{ border: '0.5px solid #d3d1c7', borderRadius: '8px', background: '#fff', overflow: 'hidden' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', padding: '10px 12px', background: '#faf9f7', borderBottom: expanded ? '0.5px solid #f1efe8' : 'none' }}>
+                          <button type="button" onClick={() => toggleDocumentFolder(folder)} style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: '#2c2c2a', fontSize: '13px', fontWeight: '500' }}>
+                            <span style={{ width: '16px', color: '#888780', fontSize: '12px' }}>{expanded ? '▾' : '▸'}</span>
+                            <span>{folder}</span>
+                            <span style={{ color: '#888780', fontWeight: '400' }}>({folderDocuments.length})</span>
+                          </button>
+                          <button type="button" onClick={() => chooseDocumentFolder(folder)} disabled={uploading} style={{ padding: '5px 10px', border: '0.5px solid #185FA5', borderRadius: '6px', background: uploading ? '#f1efe8' : '#fff', color: uploading ? '#888780' : '#185FA5', fontSize: '12px', cursor: uploading ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap' }}>
+                            {isUploadingHere ? 'Uploading...' : 'Upload'}
+                          </button>
+                        </div>
+                        {expanded && (
+                          <div style={{ padding: folderDocuments.length === 0 ? '12px' : '0 12px' }}>
+                            {folderDocuments.length === 0 ? (
+                              <div style={{ fontSize: '12px', color: '#b4b2a9', fontStyle: 'italic' }}>No documents in this folder.</div>
+                            ) : folderDocuments.map(doc => (
+                              <div key={doc.id} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 0', borderBottom: '0.5px solid #f1efe8' }}>
+                                <div style={{ width: '32px', height: '32px', background: '#E6F1FB', borderRadius: '6px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                                  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#185FA5" strokeWidth="1.5"><rect x="3" y="1" width="10" height="14" rx="1.5"/><path d="M5 5h6M5 8h6M5 11h4"/></svg>
+                                </div>
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                  <div style={{ fontSize: '13px', fontWeight: '500', color: '#2c2c2a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{doc.file_name}</div>
+                                  <div style={{ fontSize: '11px', color: '#888780', marginTop: '2px' }}>
+                                    Uploaded {formatDate(doc.created_at)} · {doc.staff?.full_name || doc.staff?.initials || 'Unknown'} {doc.file_size_kb ? `· ${formatFileSize(doc.file_size_kb)}` : ''}
+                                  </div>
+                                </div>
+                                <button onClick={() => downloadDocument(doc)} style={{ fontSize: '12px', color: '#185FA5', background: 'none', border: 'none', cursor: 'pointer', padding: '4px 8px', borderRadius: '6px' }}>Download</button>
+                                {isAdmin && <button onClick={() => deleteDocument(doc)} style={{ fontSize: '12px', color: '#a32d2d', background: 'none', border: 'none', cursor: 'pointer', padding: '4px 8px', borderRadius: '6px' }}>Delete</button>}
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
-                    </div>
-                    <button onClick={() => downloadDocument(doc)} style={{ fontSize: '12px', color: '#185FA5', background: 'none', border: 'none', cursor: 'pointer', padding: '4px 8px', borderRadius: '6px' }}>Download</button>
-                    {isAdmin && <button onClick={() => deleteDocument(doc)} style={{ fontSize: '12px', color: '#a32d2d', background: 'none', border: 'none', cursor: 'pointer', padding: '4px 8px', borderRadius: '6px' }}>Delete</button>}
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'trust_account' && showTrustAccount && (
+            <div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr)', gap: '12px', marginBottom: '1rem' }}>
+                <div style={{ background: '#faf9f7', border: '0.5px solid #d3d1c7', borderRadius: '10px', padding: '12px' }}>
+                  <div style={{ fontSize: '11px', color: '#888780', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '5px' }}>Current trust balance</div>
+                  <div style={{ fontSize: '22px', fontWeight: '600', color: '#27500a' }}>${(Number(trustAccount?.current_balance) || 0).toFixed(2)}</div>
+                </div>
+                <div style={{ background: '#faf9f7', border: '0.5px solid #d3d1c7', borderRadius: '10px', padding: '12px' }}>
+                  <div style={{ fontSize: '11px', color: '#888780', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '5px' }}>Transactions</div>
+                  <div style={{ fontSize: '22px', fontWeight: '600', color: '#2c2c2a' }}>{trustTransactions.length}</div>
+                </div>
+              </div>
+
+              <form onSubmit={saveTrustTransaction} style={{ background: '#fff', border: '0.5px solid #d3d1c7', borderRadius: '10px', padding: '12px', marginBottom: '1rem' }}>
+                <div style={{ fontSize: '13px', fontWeight: '600', color: '#2c2c2a', marginBottom: '10px' }}>Record trust transaction</div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px', marginBottom: '10px' }}>
+                  <select value={trustForm.transaction_type} onChange={e => setTrustField('transaction_type', e.target.value)} style={{ padding: '8px', border: '0.5px solid #b4b2a9', borderRadius: '8px', fontSize: '13px' }}>
+                    <option value="deposit">Deposit</option>
+                    <option value="withdrawal">Withdrawal / disbursement</option>
+                    <option value="invoice_payment">Apply to invoice</option>
+                  </select>
+                  <input type="number" min="0.01" step="0.01" value={trustForm.amount} onChange={e => setTrustField('amount', e.target.value)} placeholder="Amount" style={{ padding: '8px', border: '0.5px solid #b4b2a9', borderRadius: '8px', fontSize: '13px' }} />
+                  <input type="date" value={trustForm.transaction_date} onChange={e => setTrustField('transaction_date', e.target.value)} style={{ padding: '8px', border: '0.5px solid #b4b2a9', borderRadius: '8px', fontSize: '13px' }} />
+                </div>
+                {trustForm.transaction_type === 'invoice_payment' && (
+                  <div style={{ marginBottom: '10px' }}>
+                    <select value={trustForm.invoice_id} onChange={e => setTrustField('invoice_id', e.target.value)} style={{ width: '100%', padding: '8px', border: '0.5px solid #b4b2a9', borderRadius: '8px', fontSize: '13px' }}>
+                      <option value="">Select invoice...</option>
+                      {trustInvoices.map(inv => (
+                        <option key={inv.id} value={inv.id}>{inv.invoice_number || inv.id} · ${Number(inv.total_due || 0).toFixed(2)} · {inv.status}</option>
+                      ))}
+                    </select>
                   </div>
-                ))
+                )}
+                <textarea value={trustForm.notes} onChange={e => setTrustField('notes', e.target.value)} placeholder="Notes" rows={2} style={{ width: '100%', padding: '8px', border: '0.5px solid #b4b2a9', borderRadius: '8px', fontSize: '13px', boxSizing: 'border-box', resize: 'vertical', marginBottom: '10px' }} />
+                {trustError && <div style={{ background: '#fcebeb', border: '0.5px solid #f09595', borderRadius: '8px', padding: '8px 10px', color: '#a32d2d', fontSize: '12px', marginBottom: '10px' }}>{trustError}</div>}
+                <button type="submit" disabled={savingTrust} style={{ padding: '8px 14px', background: savingTrust ? '#888' : '#0C447C', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '12px', cursor: savingTrust ? 'not-allowed' : 'pointer' }}>
+                  {savingTrust ? 'Saving...' : 'Record transaction'}
+                </button>
+              </form>
+
+              {trustLoading ? (
+                <div style={{ textAlign: 'center', padding: '2rem', color: '#888780', fontSize: '13px' }}>Loading trust ledger...</div>
+              ) : trustTransactions.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: '1.5rem', color: '#b4b2a9', fontSize: '13px', background: '#faf9f7', borderRadius: '8px' }}>No trust transactions yet.</div>
+              ) : (
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px', minWidth: '980px' }}>
+                    <thead>
+                      <tr>
+                        {['Type', 'Amount', 'Date', 'Client', 'Case', 'Invoice', 'Notes', 'User', 'Timestamp', 'Running balance'].map(header => (
+                          <th key={header} style={{ textAlign: 'left', padding: '8px 10px', borderBottom: '0.5px solid #d3d1c7', color: '#888780', fontSize: '11px', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{header}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {trustTransactions.map(tx => (
+                        <tr key={tx.id}>
+                          <td style={{ padding: '9px 10px', borderBottom: '0.5px solid #f1efe8', whiteSpace: 'nowrap' }}>{tx.transaction_type}</td>
+                          <td style={{ padding: '9px 10px', borderBottom: '0.5px solid #f1efe8', whiteSpace: 'nowrap', fontWeight: '500' }}>${Number(tx.amount || 0).toFixed(2)}</td>
+                          <td style={{ padding: '9px 10px', borderBottom: '0.5px solid #f1efe8', whiteSpace: 'nowrap' }}>{formatDate(tx.transaction_date)}</td>
+                          <td style={{ padding: '9px 10px', borderBottom: '0.5px solid #f1efe8' }}>{c.clients?.last_name}, {c.clients?.first_name}</td>
+                          <td style={{ padding: '9px 10px', borderBottom: '0.5px solid #f1efe8', whiteSpace: 'nowrap' }}>{c.sb_number || '—'}</td>
+                          <td style={{ padding: '9px 10px', borderBottom: '0.5px solid #f1efe8', whiteSpace: 'nowrap' }}>{tx.invoices?.invoice_number || '—'}</td>
+                          <td style={{ padding: '9px 10px', borderBottom: '0.5px solid #f1efe8', maxWidth: '220px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tx.notes || '—'}</td>
+                          <td style={{ padding: '9px 10px', borderBottom: '0.5px solid #f1efe8', whiteSpace: 'nowrap' }}>{tx.staff?.initials || tx.staff?.full_name || '—'}</td>
+                          <td style={{ padding: '9px 10px', borderBottom: '0.5px solid #f1efe8', whiteSpace: 'nowrap' }}>{formatDate(tx.created_at)} {formatTime(tx.created_at)}</td>
+                          <td style={{ padding: '9px 10px', borderBottom: '0.5px solid #f1efe8', whiteSpace: 'nowrap', fontWeight: '600', color: '#27500a' }}>${Number(tx.running_balance || 0).toFixed(2)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               )}
             </div>
           )}
@@ -598,6 +948,21 @@ export default function Cases({ staff, isAttorney }) {
             </div>
           </div>
         )}
+
+        {showEditCase && (
+          <NewCaseForm
+            staff={staff}
+            existingCase={selectedCase}
+            onClose={() => setShowEditCase(false)}
+            onSaved={(updatedCase) => {
+              setCases(prev => prev.map(item => item.id === updatedCase.id ? updatedCase : item))
+              setSelectedCase(updatedCase)
+              setShowEditCase(false)
+              setNotice({ type: 'success', message: `${updatedCase.sb_number || 'Case'} was saved.` })
+            }}
+          />
+        )}
+
       </div>
     )
   }
@@ -605,6 +970,7 @@ export default function Cases({ staff, isAttorney }) {
   // ─── CASES LIST ───────────────────────────────────────────────
   return (
     <div style={{ padding: '1.25rem', fontFamily: 'sans-serif' }}>
+      <PageNotice notice={notice} onDismiss={() => setNotice(null)} />
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem', flexWrap: 'wrap', gap: '8px' }}>
         <div style={{ fontSize: '15px', fontWeight: '500', color: '#2c2c2a' }}>Cases</div>
         <button onClick={() => setShowNewCase(true)}
@@ -671,7 +1037,7 @@ export default function Cases({ staff, isAttorney }) {
                   <td style={{ padding: '10px' }}>
                     {c.case_category === 'association'
                       ? <span style={{ background: '#E6F1FB', color: '#0C447C', padding: '2px 8px', borderRadius: '20px', fontSize: '11px', fontWeight: '500' }}>{c.associations?.short_name}</span>
-                      : <span style={{ background: '#EEEDFE', color: '#3C3489', padding: '2px 8px', borderRadius: '20px', fontSize: '11px', fontWeight: '500' }}>{c.case_type || 'Private'}</span>
+                      : <span style={{ background: '#EEEDFE', color: '#3C3489', padding: '2px 8px', borderRadius: '20px', fontSize: '11px', fontWeight: '500' }}>{normalizeCaseType(c.case_type) || 'Private'}</span>
                     }
                   </td>
                   <td style={{ padding: '10px', color: '#5f5e5a', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.brief_description || '—'}</td>
@@ -716,7 +1082,15 @@ export default function Cases({ staff, isAttorney }) {
       )}
 
       {showNewCase && (
-        <NewCaseForm staff={staff} onClose={() => setShowNewCase(false)} onCreated={() => { setShowNewCase(false); fetchCases() }} />
+        <NewCaseForm
+          staff={staff}
+          onClose={() => setShowNewCase(false)}
+          onCreated={(createdCase) => {
+            setShowNewCase(false)
+            fetchCases()
+            setNotice({ type: 'success', message: `${createdCase.sb_number || 'Case'} was created.` })
+          }}
+        />
       )}
     </div>
   )

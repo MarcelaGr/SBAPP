@@ -9,7 +9,7 @@ import Clients from './pages/Clients'
 import Calendar from './pages/Calendar'
 import Timesheets from './pages/Timesheets'
 import Messages from './pages/Messages'
-import Invoices from './pages/Invoices'
+import Billing from './pages/Invoices'
 import Settings from './pages/Settings'
 import { canManageInvoices, canManageSettings, INITIAL_USER_SEEDS, isAdminRole, isAttorneyRole, normalizeRole } from './lib/roles'
 import { useChatNotifications } from './hooks/useChatNotifications'
@@ -25,7 +25,17 @@ function App() {
   const isAdmin = isAdminRole(staff?.role)
   const notifications = useChatNotifications(staff, currentPage)
 
-  async function fetchStaff(userId) {
+  async function fetchStaff(user) {
+    const userId = user?.id
+    const email = (user?.email || '').toLowerCase()
+
+    if (!userId) {
+      setAuthError('Missing authenticated user ID')
+      setStaff(null)
+      setLoading(false)
+      return
+    }
+
     const { data, error } = await supabase
       .from('staff')
       .select('*')
@@ -33,28 +43,50 @@ function App() {
       .maybeSingle()
 
     if (error) {
-      setAuthError(error.message)
+      const message = String(error.message || '')
+      if (message.toLowerCase().includes('jwt') && message.toLowerCase().includes('expired')) {
+        await supabase.auth.signOut()
+        setSession(null)
+        setAuthError('Session expired. Please sign in again.')
+      } else {
+        setAuthError(message)
+      }
       setStaff(null)
       setLoading(false)
       return
     }
 
     if (!data) {
-      const email = session?.user?.email || ''
-      const seededUser = INITIAL_USER_SEEDS.find((item) => item.email === email)
+      const seededUser = INITIAL_USER_SEEDS.find((item) => item.email.toLowerCase() === email)
 
-      setStaff(
-        seededUser
-          ? {
-              id: userId,
-              email,
-              full_name: seededUser.name,
-              initials: seededUser.name.slice(0, 2).toUpperCase(),
-              role: seededUser.role,
-              active: true,
-            }
-          : null
-      )
+      if (seededUser) {
+        const fallbackRow = {
+          id: userId,
+          email,
+          full_name: seededUser.name,
+          initials: seededUser.name.slice(0, 2).toUpperCase(),
+          role: seededUser.role,
+          active: true,
+        }
+
+        const { data: upsertedStaff, error: upsertError } = await supabase
+          .from('staff')
+          .upsert(fallbackRow, { onConflict: 'id' })
+          .select('*')
+          .single()
+
+        if (!upsertError && upsertedStaff) {
+          setAuthError('')
+          setStaff({
+            ...upsertedStaff,
+            role: normalizeRole(upsertedStaff.role, upsertedStaff.is_attorney ? 'attorney' : 'attorney'),
+          })
+          setLoading(false)
+          return
+        }
+      }
+
+      setStaff(null)
       setLoading(false)
       return
     }
@@ -69,7 +101,7 @@ function App() {
 
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session)
-      if (session) fetchStaff(session.user.id)
+      if (session) fetchStaff(session.user)
       else {
         setStaff(null)
         setLoading(false)
@@ -79,7 +111,7 @@ function App() {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       (_event, session) => {
         setSession(session)
-        if (session) fetchStaff(session.user.id)
+        if (session) fetchStaff(session.user)
         else {
           setStaff(null)
           setLoading(false)
@@ -161,8 +193,9 @@ function App() {
       case 'messages':
         return <Messages staff={staff} />
 
+      case 'billing':
       case 'invoices':
-        return canManageInvoices(staff?.role) ? <Invoices staff={staff} /> : null
+        return canManageInvoices(staff?.role) ? <Billing staff={staff} /> : null
 
       case 'settings':
         return canManageSettings(staff?.role) ? <Settings staff={staff} /> : null

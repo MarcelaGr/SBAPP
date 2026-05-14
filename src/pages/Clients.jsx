@@ -2,8 +2,12 @@ import { useEffect, useState } from 'react'
 import { supabase } from '../supabaseClient'
 import { getClientSearchValues, matchesSearch } from '../lib/search'
 import { normalizeSbNumber } from '../lib/sb'
+import { FormActions, FormModal, FormStatusMessage, PageNotice } from '../components/FormUi'
 
-// ─── NEW / EDIT CLIENT FORM ───────────────────────────────────
+function formatClientName(client) {
+  return [client?.title, client?.first_name, client?.last_name].filter(Boolean).join(' ').trim()
+}
+
 function ClientForm({ client, onClose, onSaved }) {
   const isEdit = !!client
   const [associations, setAssociations] = useState([])
@@ -11,6 +15,8 @@ function ClientForm({ client, onClose, onSaved }) {
   const [error, setError] = useState('')
   const [form, setForm] = useState({
     sb_number: client?.sb_number || '',
+    title: client?.title || '',
+    serial_number: client?.serial_number || '',
     first_name: client?.first_name || '',
     last_name: client?.last_name || '',
     email: client?.email || '',
@@ -43,6 +49,8 @@ function ClientForm({ client, onClose, onSaved }) {
     setSaving(true)
     const payload = {
       sb_number: normalizeSbNumber(form.sb_number) || null,
+      title: form.title.trim() || null,
+      serial_number: form.serial_number.trim() || null,
       first_name: form.first_name.trim(),
       last_name: form.last_name.trim(),
       email: form.email.trim() || null,
@@ -56,18 +64,19 @@ function ClientForm({ client, onClose, onSaved }) {
       active: true,
     }
 
-    let data, dbError
-    if (isEdit) {
-      const res = await supabase.from('clients').update(payload).eq('id', client.id).select('*, associations(short_name, name)').single()
-      data = res.data; dbError = res.error
-    } else {
-      const res = await supabase.from('clients').insert(payload).select('*, associations(short_name, name)').single()
-      data = res.data; dbError = res.error
+    const query = supabase.from('clients')
+    const result = isEdit
+      ? await query.update(payload).eq('id', client.id).select('*, associations(short_name, name)').single()
+      : await query.insert(payload).select('*, associations(short_name, name)').single()
+
+    if (result.error) {
+      setError('Error saving client: ' + result.error.message)
+      setSaving(false)
+      return
     }
 
-    if (dbError) { setError('Error saving client: ' + dbError.message); setSaving(false); return }
     setSaving(false)
-    onSaved(data)
+    onSaved(result.data, isEdit)
   }
 
   const inputStyle = { width: '100%', padding: '8px 10px', border: '0.5px solid #b4b2a9', borderRadius: '8px', fontSize: '13px', outline: 'none', fontFamily: 'sans-serif', boxSizing: 'border-box', color: '#2c2c2a', background: '#fff' }
@@ -77,109 +86,104 @@ function ClientForm({ client, onClose, onSaved }) {
   const sectionLabel = { fontSize: '11px', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '0.05em', color: '#888780', margin: '18px 0 12px', paddingBottom: '6px', borderBottom: '0.5px solid #f1efe8' }
 
   return (
-    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', zIndex: 100, padding: '2rem 1rem', overflowY: 'auto' }}>
-      <div style={{ background: '#fff', borderRadius: '12px', width: '100%', maxWidth: '520px', padding: '1.75rem', border: '0.5px solid #d3d1c7', marginBottom: '2rem' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.25rem' }}>
+    <FormModal
+      title={isEdit ? 'Edit client' : 'New client'}
+      subtitle={isEdit ? `Editing ${formatClientName(client)}` : 'Add a new client to the database'}
+      onClose={onClose}
+      maxWidth="560px"
+    >
+      <form onSubmit={handleSubmit}>
+        <div style={sectionLabel}>Personal information</div>
+        <div style={{ ...fieldStyle, ...gridStyle }}>
           <div>
-            <div style={{ fontSize: '16px', fontWeight: '500', color: '#2c2c2a' }}>{isEdit ? 'Edit client' : 'New client'}</div>
-            <div style={{ fontSize: '12px', color: '#888780', marginTop: '2px' }}>{isEdit ? `Editing ${client.first_name} ${client.last_name}` : 'Add a new client to the database'}</div>
-          </div>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: '20px', color: '#888780', cursor: 'pointer' }}>✕</button>
-        </div>
-
-        <form onSubmit={handleSubmit}>
-          <div style={sectionLabel}>Personal information</div>
-          <div style={fieldStyle}>
             <label style={labelStyle}>SB No.</label>
             <input type="text" value={form.sb_number} onChange={e => setField('sb_number', e.target.value)} placeholder="e.g. SB 26-0142" style={inputStyle} />
           </div>
-          <div style={{ ...fieldStyle, ...gridStyle }}>
+          <div>
+            <label style={labelStyle}>Employee number</label>
+            <input type="text" value={form.serial_number} onChange={e => setField('serial_number', e.target.value)} placeholder="e.g. 123456" style={inputStyle} />
+          </div>
+        </div>
+        <div style={{ ...fieldStyle, ...gridStyle }}>
+          <div>
+            <label style={labelStyle}>Title</label>
+            <input type="text" value={form.title} onChange={e => setField('title', e.target.value)} placeholder="e.g. Sgt." style={inputStyle} />
+          </div>
+          <div />
+        </div>
+        <div style={{ ...fieldStyle, ...gridStyle }}>
+          <div>
+            <label style={labelStyle}>First name <span style={{ color: '#a32d2d' }}>*</span></label>
+            <input type="text" value={form.first_name} onChange={e => setField('first_name', e.target.value)} placeholder="First name" style={inputStyle} />
+          </div>
+          <div>
+            <label style={labelStyle}>Last name <span style={{ color: '#a32d2d' }}>*</span></label>
+            <input type="text" value={form.last_name} onChange={e => setField('last_name', e.target.value)} placeholder="Last name" style={inputStyle} />
+          </div>
+        </div>
+        <div style={{ ...fieldStyle, ...gridStyle }}>
+          <div>
+            <label style={labelStyle}>Email</label>
+            <input type="email" value={form.email} onChange={e => setField('email', e.target.value)} placeholder="client@email.com" style={inputStyle} />
+          </div>
+          <div>
+            <label style={labelStyle}>Phone</label>
+            <input type="tel" value={form.phone} onChange={e => setField('phone', e.target.value)} placeholder="(xxx) xxx-xxxx" style={inputStyle} />
+          </div>
+        </div>
+
+        <div style={sectionLabel}>Client type</div>
+        <div style={{ ...fieldStyle, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+          {['association', 'private'].map(t => (
+            <div
+              key={t}
+              onClick={() => setField('client_type', t)}
+              style={{ padding: '12px', borderRadius: '8px', cursor: 'pointer', textAlign: 'center', border: form.client_type === t ? '2px solid #0C447C' : '0.5px solid #d3d1c7', background: form.client_type === t ? '#E6F1FB' : '#fff', color: form.client_type === t ? '#0C447C' : '#5f5e5a', fontWeight: form.client_type === t ? '500' : '400', fontSize: '13px' }}
+            >
+              {t === 'association' ? 'Association member' : 'Private client'}
+            </div>
+          ))}
+        </div>
+
+        {form.client_type === 'association' && (
+          <div style={{ ...gridStyle, marginBottom: '14px' }}>
             <div>
-              <label style={labelStyle}>First name <span style={{ color: '#a32d2d' }}>*</span></label>
-              <input type="text" value={form.first_name} onChange={e => setField('first_name', e.target.value)} placeholder="First name" style={inputStyle} />
+              <label style={labelStyle}>Association <span style={{ color: '#a32d2d' }}>*</span></label>
+              <select value={form.association_id} onChange={e => setField('association_id', e.target.value)} style={inputStyle}>
+                <option value="">Select association...</option>
+                {associations.map(a => <option key={a.id} value={a.id}>{a.short_name} — {a.name}</option>)}
+              </select>
             </div>
             <div>
-              <label style={labelStyle}>Last name <span style={{ color: '#a32d2d' }}>*</span></label>
-              <input type="text" value={form.last_name} onChange={e => setField('last_name', e.target.value)} placeholder="Last name" style={inputStyle} />
+              <label style={labelStyle}>Member ID</label>
+              <input type="text" value={form.member_id} onChange={e => setField('member_id', e.target.value)} placeholder="Association member no." style={inputStyle} />
             </div>
           </div>
-          <div style={{ ...fieldStyle, ...gridStyle }}>
-            <div>
-              <label style={labelStyle}>Email</label>
-              <input type="email" value={form.email} onChange={e => setField('email', e.target.value)} placeholder="client@email.com" style={inputStyle} />
-            </div>
-            <div>
-              <label style={labelStyle}>Phone</label>
-              <input type="tel" value={form.phone} onChange={e => setField('phone', e.target.value)} placeholder="(xxx) xxx-xxxx" style={inputStyle} />
-            </div>
-          </div>
+        )}
 
-          <div style={sectionLabel}>Client type</div>
-          <div style={{ ...fieldStyle, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-            {['association', 'private'].map(t => (
-              <div key={t} onClick={() => setField('client_type', t)}
-                style={{ padding: '12px', borderRadius: '8px', cursor: 'pointer', textAlign: 'center', border: form.client_type === t ? '2px solid #0C447C' : '0.5px solid #d3d1c7', background: form.client_type === t ? '#E6F1FB' : '#fff', color: form.client_type === t ? '#0C447C' : '#5f5e5a', fontWeight: form.client_type === t ? '500' : '400', fontSize: '13px' }}>
-                {t === 'association' ? '🏛 Association member' : '👤 Private client'}
-              </div>
-            ))}
-          </div>
+        <div style={sectionLabel}>Address</div>
+        <div style={fieldStyle}>
+          <label style={labelStyle}>Street address</label>
+          <input type="text" value={form.address_street} onChange={e => setField('address_street', e.target.value)} placeholder="123 Main St" style={inputStyle} />
+        </div>
+        <div style={fieldStyle}>
+          <label style={labelStyle}>City, state, ZIP</label>
+          <input type="text" value={form.address_city_state_zip} onChange={e => setField('address_city_state_zip', e.target.value)} placeholder="Los Angeles, CA 90001" style={inputStyle} />
+        </div>
 
-          {form.client_type === 'association' && (
-            <div style={{ ...gridStyle, marginBottom: '14px' }}>
-              <div>
-                <label style={labelStyle}>Association <span style={{ color: '#a32d2d' }}>*</span></label>
-                <select value={form.association_id} onChange={e => setField('association_id', e.target.value)} style={inputStyle}>
-                  <option value="">Select association...</option>
-                  {associations.map(a => <option key={a.id} value={a.id}>{a.short_name} — {a.name}</option>)}
-                </select>
-              </div>
-              <div>
-                <label style={labelStyle}>Member ID</label>
-                <input type="text" value={form.member_id} onChange={e => setField('member_id', e.target.value)} placeholder="Association member no." style={inputStyle} />
-              </div>
-            </div>
-          )}
+        <div style={sectionLabel}>Notes</div>
+        <div style={fieldStyle}>
+          <textarea value={form.notes} onChange={e => setField('notes', e.target.value)} placeholder="Any relevant notes about this client..." rows={3} style={{ ...inputStyle, resize: 'vertical', minHeight: '72px' }} />
+        </div>
 
-          <div style={sectionLabel}>Address</div>
-          <div style={fieldStyle}>
-            <label style={labelStyle}>Street address</label>
-            <input type="text" value={form.address_street} onChange={e => setField('address_street', e.target.value)} placeholder="123 Main St" style={inputStyle} />
-          </div>
-          <div style={fieldStyle}>
-            <label style={labelStyle}>City, state, ZIP</label>
-            <input type="text" value={form.address_city_state_zip} onChange={e => setField('address_city_state_zip', e.target.value)} placeholder="Los Angeles, CA 90001" style={inputStyle} />
-          </div>
-
-          <div style={sectionLabel}>Notes</div>
-          <div style={fieldStyle}>
-            <textarea value={form.notes} onChange={e => setField('notes', e.target.value)} placeholder="Any relevant notes about this client..." rows={3}
-              style={{ ...inputStyle, resize: 'vertical', minHeight: '72px' }} />
-          </div>
-
-          {error && (
-            <div style={{ background: '#fcebeb', border: '0.5px solid #f09595', borderRadius: '8px', padding: '8px 12px', fontSize: '12px', color: '#a32d2d', marginBottom: '1rem' }}>
-              {error}
-            </div>
-          )}
-
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '8px' }}>
-            <button type="button" onClick={onClose}
-              style={{ padding: '8px 18px', border: '0.5px solid #d3d1c7', borderRadius: '8px', background: '#fff', fontSize: '13px', cursor: 'pointer', color: '#5f5e5a' }}>
-              Cancel
-            </button>
-            <button type="submit" disabled={saving}
-              style={{ padding: '8px 18px', border: 'none', borderRadius: '8px', background: saving ? '#888' : '#0C447C', color: '#fff', fontSize: '13px', fontWeight: '500', cursor: saving ? 'not-allowed' : 'pointer' }}>
-              {saving ? 'Saving...' : isEdit ? 'Save changes' : 'Save client'}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
+        <FormStatusMessage message={error} />
+        <FormActions onCancel={onClose} saving={saving} saveLabel="Save client" />
+      </form>
+    </FormModal>
   )
 }
 
-// ─── CLIENT DETAIL ────────────────────────────────────────────
-function ClientDetail({ client: initialClient, onBack, onDeleted, staff }) {
+function ClientDetail({ client: initialClient, onBack, onDeleted, onUpdated, onNotice, staff }) {
   const [client, setClient] = useState(initialClient)
   const [cases, setCases] = useState([])
   const [casesLoading, setCasesLoading] = useState(true)
@@ -189,8 +193,13 @@ function ClientDetail({ client: initialClient, onBack, onDeleted, staff }) {
 
   async function deleteClient() {
     setDeleting(true)
-    await supabase.from('clients').update({ active: false }).eq('id', client.id)
+    const { error } = await supabase.from('clients').update({ active: false }).eq('id', client.id)
     setDeleting(false)
+    if (error) {
+      onNotice({ type: 'error', message: `Unable to delete client: ${error.message}` })
+      return
+    }
+    onNotice({ type: 'success', message: `${formatClientName(client)} was deleted.` })
     onDeleted(client.id)
   }
 
@@ -227,58 +236,50 @@ function ClientDetail({ client: initialClient, onBack, onDeleted, staff }) {
 
   return (
     <div style={{ padding: '1.25rem', fontFamily: 'sans-serif', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
         <button onClick={onBack} style={{ background: 'none', border: 'none', color: '#185FA5', fontSize: '13px', cursor: 'pointer', padding: 0 }}>
           ← Back to clients
         </button>
         <div style={{ display: 'flex', gap: '8px' }}>
           {staff?.role === 'admin' && (
-            <button onClick={() => setShowDeleteConfirm(true)}
-              style={{ padding: '6px 14px', background: '#fff', color: '#a32d2d', border: '0.5px solid #f09595', borderRadius: '8px', fontSize: '12px', cursor: 'pointer' }}>
+            <button onClick={() => setShowDeleteConfirm(true)} style={{ padding: '6px 14px', background: '#fff', color: '#a32d2d', border: '0.5px solid #f09595', borderRadius: '8px', fontSize: '12px', cursor: 'pointer' }}>
               Delete client
             </button>
           )}
-          <button onClick={() => setShowEditForm(true)}
-            style={{ padding: '6px 14px', background: '#0C447C', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '12px', cursor: 'pointer' }}>
+          <button onClick={() => setShowEditForm(true)} style={{ padding: '6px 14px', background: '#0C447C', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '12px', cursor: 'pointer' }}>
             Edit client
           </button>
         </div>
       </div>
 
-      {/* Client header */}
       <div style={{ background: '#fff', border: '0.5px solid #d3d1c7', borderRadius: '12px', padding: '1.25rem', display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
         <div style={{ width: '52px', height: '52px', borderRadius: '50%', background: '#E6F1FB', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '18px', fontWeight: '500', color: '#0C447C', border: '2px solid #B5D4F4', flexShrink: 0 }}>
-          {client.first_name[0]}{client.last_name[0]}
+          {client.first_name?.[0]}{client.last_name?.[0]}
         </div>
         <div style={{ flex: 1 }}>
-          <div style={{ fontSize: '18px', fontWeight: '500', color: '#2c2c2a' }}>{client.first_name} {client.last_name}</div>
+          <div style={{ fontSize: '18px', fontWeight: '500', color: '#2c2c2a' }}>{formatClientName(client)}</div>
           <div style={{ fontSize: '13px', color: '#888780', marginTop: '2px', display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+            {client.serial_number && <span>Employee no. {client.serial_number}</span>}
             {client.email && <span>{client.email}</span>}
             {client.phone && <span>{client.phone}</span>}
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
-          {client.associations?.short_name && (
-            <span style={{ background: '#E6F1FB', color: '#0C447C', padding: '3px 10px', borderRadius: '20px', fontSize: '12px', fontWeight: '500' }}>
-              {client.associations.short_name}
-            </span>
-          )}
+          {client.associations?.short_name && <span style={{ background: '#E6F1FB', color: '#0C447C', padding: '3px 10px', borderRadius: '20px', fontSize: '12px', fontWeight: '500' }}>{client.associations.short_name}</span>}
           <span style={{ background: client.client_type === 'association' ? '#E6F1FB' : '#EEEDFE', color: client.client_type === 'association' ? '#0C447C' : '#3C3489', padding: '3px 10px', borderRadius: '20px', fontSize: '12px', fontWeight: '500' }}>
             {client.client_type === 'association' ? 'Association member' : 'Private client'}
           </span>
         </div>
       </div>
 
-      {/* Two col layout */}
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1.6fr)', gap: '1rem', alignItems: 'start' }}>
-
-        {/* Client info */}
         <div style={{ background: '#fff', border: '0.5px solid #d3d1c7', borderRadius: '12px', padding: '1.25rem' }}>
           <div style={{ fontSize: '11px', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '0.05em', color: '#888780', marginBottom: '0.75rem' }}>Client information</div>
           {[
             { label: 'SB No.', value: client.sb_number || '—' },
-            { label: 'Full name', value: `${client.first_name} ${client.last_name}` },
+            { label: 'Employee No.', value: client.serial_number || '—' },
+            { label: 'Title', value: client.title || '—' },
+            { label: 'Full name', value: formatClientName(client) || '—' },
             { label: 'Email', value: client.email || '—' },
             { label: 'Phone', value: client.phone || '—' },
             { label: 'Type', value: client.client_type === 'association' ? 'Association member' : 'Private client' },
@@ -300,7 +301,6 @@ function ClientDetail({ client: initialClient, onBack, onDeleted, staff }) {
           )}
         </div>
 
-        {/* Related cases */}
         <div style={{ background: '#fff', border: '0.5px solid #d3d1c7', borderRadius: '12px', padding: '1.25rem' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
             <div style={{ fontSize: '11px', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '0.05em', color: '#888780' }}>Related cases</div>
@@ -324,12 +324,8 @@ function ClientDetail({ client: initialClient, onBack, onDeleted, staff }) {
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px', flexWrap: 'wrap' }}>
                         <span style={{ fontSize: '13px', fontWeight: '500', color: '#185FA5' }}>{c.sb_number}</span>
-                        {c.associations?.short_name && (
-                          <span style={{ background: '#E6F1FB', color: '#0C447C', padding: '1px 7px', borderRadius: '20px', fontSize: '10px', fontWeight: '500' }}>{c.associations.short_name}</span>
-                        )}
-                        {c.case_type && (
-                          <span style={{ background: '#EEEDFE', color: '#3C3489', padding: '1px 7px', borderRadius: '20px', fontSize: '10px', fontWeight: '500' }}>{c.case_type}</span>
-                        )}
+                        {c.associations?.short_name && <span style={{ background: '#E6F1FB', color: '#0C447C', padding: '1px 7px', borderRadius: '20px', fontSize: '10px', fontWeight: '500' }}>{c.associations.short_name}</span>}
+                        {c.case_type && <span style={{ background: '#EEEDFE', color: '#3C3489', padding: '1px 7px', borderRadius: '20px', fontSize: '10px', fontWeight: '500' }}>{c.case_type}</span>}
                       </div>
                       <div style={{ fontSize: '13px', color: '#2c2c2a', marginBottom: '4px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {c.brief_description || '—'}
@@ -360,7 +356,12 @@ function ClientDetail({ client: initialClient, onBack, onDeleted, staff }) {
         <ClientForm
           client={client}
           onClose={() => setShowEditForm(false)}
-          onSaved={(updated) => { setClient(updated); setShowEditForm(false) }}
+          onSaved={(updated) => {
+            setClient(updated)
+            setShowEditForm(false)
+            onUpdated(updated)
+            onNotice({ type: 'success', message: `${formatClientName(updated)} was saved.` })
+          }}
         />
       )}
 
@@ -369,7 +370,7 @@ function ClientDetail({ client: initialClient, onBack, onDeleted, staff }) {
           <div style={{ background: '#fff', borderRadius: '12px', padding: '1.5rem', width: '360px', border: '0.5px solid #d3d1c7' }}>
             <div style={{ fontSize: '15px', fontWeight: '500', color: '#2c2c2a', marginBottom: '8px' }}>Delete this client?</div>
             <p style={{ fontSize: '13px', color: '#5f5e5a', marginBottom: '1.25rem', lineHeight: '1.5' }}>
-              This will deactivate <strong>{client.first_name} {client.last_name}</strong>. Their cases will remain in the system.
+              This will deactivate <strong>{formatClientName(client)}</strong>. Their cases will remain in the system.
             </p>
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
               <button onClick={() => setShowDeleteConfirm(false)} style={{ padding: '7px 16px', border: '0.5px solid #d3d1c7', borderRadius: '8px', background: '#fff', fontSize: '13px', cursor: 'pointer' }}>Cancel</button>
@@ -384,7 +385,6 @@ function ClientDetail({ client: initialClient, onBack, onDeleted, staff }) {
   )
 }
 
-// ─── CLIENTS LIST ─────────────────────────────────────────────
 export default function Clients({ staff }) {
   const [clients, setClients] = useState([])
   const [loading, setLoading] = useState(true)
@@ -392,6 +392,7 @@ export default function Clients({ staff }) {
   const [typeFilter, setTypeFilter] = useState('all')
   const [selectedClient, setSelectedClient] = useState(null)
   const [showNewClient, setShowNewClient] = useState(false)
+  const [notice, setNotice] = useState(null)
 
   useEffect(() => {
     let cancelled = false
@@ -427,7 +428,15 @@ export default function Clients({ staff }) {
         client={selectedClient}
         staff={staff}
         onBack={() => setSelectedClient(null)}
-        onDeleted={(id) => { setClients(clients.filter(c => c.id !== id)); setSelectedClient(null) }}
+        onNotice={setNotice}
+        onUpdated={(updated) => {
+          setClients(prev => prev.map(c => c.id === updated.id ? updated : c).sort((a, b) => a.last_name.localeCompare(b.last_name)))
+          setSelectedClient(updated)
+        }}
+        onDeleted={(id) => {
+          setClients(prev => prev.filter(c => c.id !== id))
+          setSelectedClient(null)
+        }}
       />
     )
   }
@@ -436,11 +445,12 @@ export default function Clients({ staff }) {
     <div style={{ padding: '1.25rem', fontFamily: 'sans-serif' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem', flexWrap: 'wrap', gap: '8px' }}>
         <div style={{ fontSize: '15px', fontWeight: '500', color: '#2c2c2a' }}>Clients</div>
-        <button onClick={() => setShowNewClient(true)}
-          style={{ padding: '6px 14px', background: '#0C447C', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '12px', fontWeight: '500', cursor: 'pointer' }}>
+        <button onClick={() => setShowNewClient(true)} style={{ padding: '6px 14px', background: '#0C447C', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '12px', fontWeight: '500', cursor: 'pointer' }}>
           + New client
         </button>
       </div>
+
+      <PageNotice notice={notice} onDismiss={() => setNotice(null)} />
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0,1fr))', gap: '10px', marginBottom: '1rem' }}>
         {[
@@ -459,12 +469,10 @@ export default function Clients({ staff }) {
         <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '1rem', alignItems: 'center' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px', background: '#f1efe8', border: '0.5px solid #d3d1c7', borderRadius: '8px', padding: '5px 10px' }}>
             <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#888" strokeWidth="1.5"><circle cx="7" cy="7" r="5"/><path d="M11 11l3 3"/></svg>
-            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search clients, email, member ID..."
-              style={{ border: 'none', background: 'transparent', fontSize: '13px', outline: 'none', width: '200px', color: '#2c2c2a' }} />
+            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search clients, employee no., email, member ID..." style={{ border: 'none', background: 'transparent', fontSize: '13px', outline: 'none', width: '240px', color: '#2c2c2a' }} />
           </div>
           {['all', 'association', 'private'].map(t => (
-            <button key={t} onClick={() => setTypeFilter(t)}
-              style={{ padding: '4px 12px', borderRadius: '20px', fontSize: '12px', fontWeight: '500', cursor: 'pointer', border: '0.5px solid', borderColor: typeFilter === t ? '#0C447C' : '#d3d1c7', background: typeFilter === t ? '#0C447C' : '#fff', color: typeFilter === t ? '#fff' : '#5f5e5a' }}>
+            <button key={t} onClick={() => setTypeFilter(t)} style={{ padding: '4px 12px', borderRadius: '20px', fontSize: '12px', fontWeight: '500', cursor: 'pointer', border: '0.5px solid', borderColor: typeFilter === t ? '#0C447C' : '#d3d1c7', background: typeFilter === t ? '#0C447C' : '#fff', color: typeFilter === t ? '#fff' : '#5f5e5a' }}>
               {t.charAt(0).toUpperCase() + t.slice(1)}
             </button>
           ))}
@@ -479,25 +487,23 @@ export default function Clients({ staff }) {
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
             <thead>
               <tr>
-                {['Name', 'Email', 'Phone', 'Type', 'Association', 'Member ID', ''].map(h => (
+                {['Name', 'Employee No.', 'Email', 'Phone', 'Type', 'Association', 'Member ID', ''].map(h => (
                   <th key={h} style={{ textAlign: 'left', padding: '7px 10px', fontSize: '11px', fontWeight: '500', color: '#888780', borderBottom: '0.5px solid #d3d1c7', textTransform: 'uppercase', letterSpacing: '0.04em', whiteSpace: 'nowrap' }}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {filtered.map(c => (
-                <tr key={c.id} onClick={() => setSelectedClient(c)} style={{ cursor: 'pointer' }}
-                  onMouseEnter={e => e.currentTarget.style.background = '#f1efe8'}
-                  onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-                >
+                <tr key={c.id} onClick={() => setSelectedClient(c)} style={{ cursor: 'pointer' }} onMouseEnter={e => e.currentTarget.style.background = '#f1efe8'} onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
                   <td style={{ padding: '10px' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                       <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: '#E6F1FB', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '10px', fontWeight: '500', color: '#0C447C', border: '1px solid #B5D4F4', flexShrink: 0 }}>
-                        {c.first_name[0]}{c.last_name[0]}
+                        {c.first_name?.[0]}{c.last_name?.[0]}
                       </div>
-                      <span style={{ fontWeight: '500', color: '#2c2c2a' }}>{c.last_name}, {c.first_name}</span>
+                      <span style={{ fontWeight: '500', color: '#2c2c2a' }}>{formatClientName(c)}</span>
                     </div>
                   </td>
+                  <td style={{ padding: '10px', color: '#5f5e5a', fontFamily: 'monospace', fontSize: '12px' }}>{c.serial_number || '—'}</td>
                   <td style={{ padding: '10px', color: '#5f5e5a' }}>{c.email || '—'}</td>
                   <td style={{ padding: '10px', color: '#5f5e5a', whiteSpace: 'nowrap' }}>{c.phone || '—'}</td>
                   <td style={{ padding: '10px' }}>
@@ -529,6 +535,7 @@ export default function Clients({ staff }) {
             setClients(prev => [newClient, ...prev].sort((a, b) => a.last_name.localeCompare(b.last_name)))
             setShowNewClient(false)
             setSelectedClient(newClient)
+            setNotice({ type: 'success', message: `${formatClientName(newClient)} was created.` })
           }}
         />
       )}

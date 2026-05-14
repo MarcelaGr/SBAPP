@@ -4,13 +4,12 @@ import { supabase } from '../supabaseClient'
 import { matchesSearch } from '../lib/search'
 import { normalizeSbNumber } from '../lib/sb'
 
-export default function Invoices({ staff }) {
+export default function Billing({ staff }) {
   const [invoiceRuns, setInvoiceRuns] = useState([])
   const [invoices, setInvoices] = useState([])
   const [associations, setAssociations] = useState([])
   const [cases, setCases] = useState([])
   const [loading, setLoading] = useState(true)
-  const [generating, setGenerating] = useState(false)
   const [creatingInvoice, setCreatingInvoice] = useState(false)
   const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1)
   const [selectedYear, setSelectedYear] = useState(new Date().getFullYear())
@@ -20,11 +19,14 @@ export default function Invoices({ staff }) {
   const [expandedRuns, setExpandedRuns] = useState({})
   const [selected, setSelected] = useState([])
   const [previewInvoice, setPreviewInvoice] = useState(null)
+  const [invoiceToDelete, setInvoiceToDelete] = useState(null)
+  const [deletingInvoice, setDeletingInvoice] = useState(false)
   const [showCreateForm, setShowCreateForm] = useState(false)
   const [createError, setCreateError] = useState('')
   const [pageError, setPageError] = useState('')
   const [invoiceSearch, setInvoiceSearch] = useState('')
   const [savingSbNumber, setSavingSbNumber] = useState(false)
+  const [showNonBillableItems, setShowNonBillableItems] = useState(false)
   const [createForm, setCreateForm] = useState(getDefaultCreateForm())
   const [firmInfo] = useState({
     name: 'Stone Busailah LLP',
@@ -111,7 +113,9 @@ export default function Invoices({ staff }) {
           *,
           cases(id, sb_number, brief_description, association_case_number,
             clients(first_name, last_name),
-            case_attorneys(is_lead, staff(full_name, initials))
+            case_attorneys(is_lead, staff(full_name, initials)),
+            time_entries(id, entry_date, hours, description, computed_amount, status, billable, staff:attorney_id(full_name, initials), time_entry_expenses(id, title, amount, billable, expense_date)),
+            case_expenses(id, expense_date, title, amount, billable)
           ),
           associations(id, short_name, name, billing_contact_name, billing_contact_email, address_street, address_city_state_zip),
           invoice_runs(id, period_month, period_year, association_id, associations(short_name, name))
@@ -144,132 +148,34 @@ export default function Invoices({ staff }) {
     }
   }
 
-  async function generateRun() {
-    setGenerating(true)
-
-    try {
-      const { data: cases, error: casesError } = await supabase
-        .from('cases')
-        .select(`*, clients(first_name, last_name), associations(id, short_name, name), time_entries(id, hours, computed_amount, status)`)
-        .eq('status', 'active')
-
-      if (casesError) throw casesError
-      if (!cases || cases.length === 0) {
-        alert('No active cases found.')
-        return
-      }
-
-      const byAssoc = {}
-      cases.forEach(c => {
-        const key = c.case_category === 'private' ? '__private__' : (c.association_id || '__private__')
-        if (!byAssoc[key]) byAssoc[key] = []
-        byAssoc[key].push(c)
-      })
-
-      let createdCount = 0
-
-      for (const [assocKey, assocCases] of Object.entries(byAssoc)) {
-        const isPrivate = assocKey === '__private__'
-        const assocId = isPrivate ? null : assocKey
-
-        const existingRunQuery = supabase
-          .from('invoice_runs')
-          .select('id')
-          .eq('period_month', selectedMonth)
-          .eq('period_year', selectedYear)
-
-        const runLookup = assocId
-          ? existingRunQuery.eq('association_id', assocId)
-          : existingRunQuery.is('association_id', null)
-
-        const { data: existingRun, error: existingRunError } = await runLookup.maybeSingle()
-        if (existingRunError) throw existingRunError
-
-        let run = existingRun
-
-        if (!run) {
-          const { data: insertedRun, error: runInsertError } = await supabase
-            .from('invoice_runs')
-            .insert({
-              period_month: selectedMonth,
-              period_year: selectedYear,
-              association_id: assocId,
-              generated_by: staff?.id,
-            })
-            .select('id')
-            .single()
-
-          if (runInsertError) throw runInsertError
-          run = insertedRun
-        }
-
-        for (const c of assocCases) {
-          const approvedEntries = (c.time_entries || []).filter(e => e.status === 'approved')
-          const subtotal = approvedEntries.reduce((s, e) => s + (e.computed_amount || 0), 0)
-
-          const { data: existingInv, error: existingInvError } = await supabase
-            .from('invoices')
-            .select('id')
-            .eq('case_id', c.id)
-            .eq('period_month', selectedMonth)
-            .eq('period_year', selectedYear)
-            .eq('invoice_kind', 'case')
-            .maybeSingle()
-
-          if (existingInvError) throw existingInvError
-
-          if (!existingInv) {
-            const { error: insertInvoiceError } = await supabase.from('invoices').insert({
-              invoice_run_id: run.id, case_id: c.id, client_id: c.client_id, association_id: assocId,
-              invoice_kind: 'case', period_month: selectedMonth, period_year: selectedYear,
-              subtotal, total_due: subtotal, status: 'draft',
-              issued_at: new Date().toISOString().split('T')[0],
-              due_at: new Date(selectedYear, selectedMonth, 15).toISOString().split('T')[0],
-            })
-
-            if (insertInvoiceError) throw insertInvoiceError
-            createdCount += 1
-          }
-        }
-
-        if (!isPrivate) {
-          const { data: existingSummary, error: existingSummaryError } = await supabase
-            .from('invoices')
-            .select('id')
-            .eq('invoice_run_id', run.id)
-            .eq('invoice_kind', 'association_summary')
-            .maybeSingle()
-
-          if (existingSummaryError) throw existingSummaryError
-
-          if (!existingSummary) {
-            const totalSubtotal = assocCases.reduce((s, c) => s + (c.time_entries || []).filter(e => e.status === 'approved').reduce((ss, e) => ss + (e.computed_amount || 0), 0), 0)
-            const { error: insertSummaryError } = await supabase.from('invoices').insert({
-              invoice_run_id: run.id, case_id: assocCases[0].id, client_id: assocCases[0].client_id, association_id: assocId,
-              invoice_kind: 'association_summary', period_month: selectedMonth, period_year: selectedYear,
-              subtotal: totalSubtotal, total_due: totalSubtotal, status: 'draft',
-              issued_at: new Date().toISOString().split('T')[0],
-              due_at: new Date(selectedYear, selectedMonth, 15).toISOString().split('T')[0],
-            })
-
-            if (insertSummaryError) throw insertSummaryError
-          }
-        }
-      }
-
-      await fetchInvoices()
-      alert(createdCount > 0 ? `Created ${createdCount} invoice${createdCount === 1 ? '' : 's'}.` : 'Invoice run is already up to date for this period.')
-    } catch (error) {
-      console.error('Failed to generate invoice run:', error)
-      alert(`Could not generate invoices: ${error.message || 'Unknown error'}`)
-    } finally {
-      setGenerating(false)
-    }
-  }
-
   async function updateInvoiceStatus(id, status) {
     await supabase.from('invoices').update({ status, paid_at: status === 'paid' ? new Date().toISOString().split('T')[0] : null }).eq('id', id)
     setInvoices(prev => prev.map(inv => inv.id === id ? { ...inv, status } : inv))
+  }
+
+  async function deleteInvoice() {
+    if (!invoiceToDelete) return
+
+    setDeletingInvoice(true)
+    setPageError('')
+
+    const { error } = await supabase
+      .from('invoices')
+      .delete()
+      .eq('id', invoiceToDelete.id)
+
+    if (error) {
+      setPageError(`Could not delete invoice: ${error.message}`)
+      setDeletingInvoice(false)
+      return
+    }
+
+    setInvoices(prev => prev.filter(inv => inv.id !== invoiceToDelete.id))
+    setSelected(prev => prev.filter(id => id !== invoiceToDelete.id))
+    setPreviewInvoice(prev => prev?.id === invoiceToDelete.id ? null : prev)
+    setInvoiceToDelete(null)
+    setDeletingInvoice(false)
+    fetchInvoices()
   }
 
   async function bulkUpdateStatus(status) {
@@ -327,8 +233,22 @@ export default function Invoices({ staff }) {
 
   function sumApprovedEntriesInRange(entries, startDate, endDate) {
     return (entries || [])
-      .filter(entry => entry.status === 'approved' && entry.entry_date >= startDate && entry.entry_date <= endDate)
+      .filter(entry => entry.status === 'approved' && entry.billable !== false && entry.entry_date >= startDate && entry.entry_date <= endDate)
       .reduce((sum, entry) => sum + (entry.computed_amount || 0), 0)
+  }
+
+  function sumBillableExpensesInRange(expenses, startDate, endDate) {
+    return (expenses || [])
+      .filter(expense => expense.billable && expense.expense_date >= startDate && expense.expense_date <= endDate)
+      .reduce((sum, expense) => sum + (Number(expense.amount) || 0), 0)
+  }
+
+  function sumTimeEntryExpensesInRange(entries, startDate, endDate) {
+    return (entries || [])
+      .filter(entry => entry.status === 'approved' && entry.billable !== false && entry.entry_date >= startDate && entry.entry_date <= endDate)
+      .flatMap(entry => entry.time_entry_expenses || [])
+      .filter(expense => expense.billable && expense.expense_date >= startDate && expense.expense_date <= endDate)
+      .reduce((sum, expense) => sum + (Number(expense.amount) || 0), 0)
   }
 
   async function handleCreateInvoice(e) {
@@ -364,7 +284,8 @@ export default function Invoices({ staff }) {
           .from('cases')
           .select(`
             id, sb_number, client_id, association_id, case_category,
-            time_entries(entry_date, computed_amount, status)
+            time_entries(entry_date, computed_amount, status, billable, time_entry_expenses(expense_date, amount, billable)),
+            case_expenses(expense_date, amount, billable)
           `)
           .eq('id', createForm.caseId)
           .single()
@@ -409,7 +330,10 @@ export default function Invoices({ staff }) {
           }
         }
 
-        const subtotal = sumApprovedEntriesInRange(selectedCase.time_entries, createForm.startDate, createForm.endDate)
+        const subtotal =
+          sumApprovedEntriesInRange(selectedCase.time_entries, createForm.startDate, createForm.endDate) +
+          sumBillableExpensesInRange(selectedCase.case_expenses, createForm.startDate, createForm.endDate) +
+          sumTimeEntryExpensesInRange(selectedCase.time_entries, createForm.startDate, createForm.endDate)
 
         const { error: insertError } = await supabase.from('invoices').insert({
           invoice_run_id: run.id,
@@ -431,7 +355,7 @@ export default function Invoices({ staff }) {
       } else {
         const { data: associationCases, error: associationCasesError } = await supabase
           .from('cases')
-          .select('id, client_id, time_entries(entry_date, computed_amount, status)')
+          .select('id, client_id, time_entries(entry_date, computed_amount, status, billable, time_entry_expenses(expense_date, amount, billable)), case_expenses(expense_date, amount, billable)')
           .eq('association_id', createForm.associationId)
           .eq('case_category', 'association')
 
@@ -459,7 +383,10 @@ export default function Invoices({ staff }) {
         }
 
         const subtotal = associationCases.reduce(
-          (sum, currentCase) => sum + sumApprovedEntriesInRange(currentCase.time_entries, createForm.startDate, createForm.endDate),
+          (sum, currentCase) => sum +
+            sumApprovedEntriesInRange(currentCase.time_entries, createForm.startDate, createForm.endDate) +
+            sumBillableExpensesInRange(currentCase.case_expenses, createForm.startDate, createForm.endDate) +
+            sumTimeEntryExpensesInRange(currentCase.time_entries, createForm.startDate, createForm.endDate),
           0
         )
 
@@ -639,18 +566,19 @@ export default function Invoices({ staff }) {
                 <rect x="2" y="2" width="12" height="12" rx="1.5"/><path d="M5 8h6M5 5h6M5 11h4"/>
               </svg>
             </div>
-            <div style={{ fontSize: '20px', fontWeight: '600', color: '#1a1a18', letterSpacing: '-0.3px' }}>Invoices</div>
+            <div style={{ fontSize: '20px', fontWeight: '600', color: '#1a1a18', letterSpacing: '-0.3px' }}>Billing</div>
           </div>
-          <div style={{ fontSize: '13px', color: '#888780', marginLeft: '42px' }}>Admin view — monthly billing runs</div>
+          <div style={{ fontSize: '13px', color: '#888780', marginLeft: '42px' }}>Invoices — monthly billing runs</div>
+          <div style={{ display: 'flex', gap: '6px', marginLeft: '42px', marginTop: '10px' }}>
+            <button
+              type="button"
+              style={{ padding: '5px 12px', borderRadius: '8px', border: 'none', background: '#0C447C', color: '#fff', fontSize: '12px', fontWeight: '500', cursor: 'default' }}
+            >
+              Invoices
+            </button>
+          </div>
         </div>
         <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-          <button onClick={generateRun} disabled={generating}
-            style={{ padding: '8px 16px', background: '#fff', color: '#0C447C', border: '1px solid #B5D4F4', borderRadius: '10px', fontSize: '13px', fontWeight: '500', cursor: generating ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: '6px', transition: 'all 0.15s', boxShadow: '0 1px 3px rgba(0,0,0,0.06)' }}
-            onMouseEnter={e => { if (!generating) { e.currentTarget.style.background = '#E6F1FB'; e.currentTarget.style.borderColor = '#0C447C' } }}
-            onMouseLeave={e => { e.currentTarget.style.background = '#fff'; e.currentTarget.style.borderColor = '#B5D4F4' }}>
-            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M8 3v4l3 1.5"/><circle cx="8" cy="8" r="6"/></svg>
-            {generating ? 'Generating…' : 'Generate run'}
-          </button>
           <button onClick={openCreateForm}
             style={{ padding: '8px 18px', background: 'linear-gradient(135deg, #0C447C 0%, #185FA5 100%)', color: '#fff', border: 'none', borderRadius: '10px', fontSize: '13px', fontWeight: '600', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '7px', boxShadow: '0 2px 8px rgba(12,68,124,0.28)', transition: 'box-shadow 0.15s' }}
             onMouseEnter={e => e.currentTarget.style.boxShadow = '0 4px 16px rgba(12,68,124,0.38)'}
@@ -762,10 +690,10 @@ export default function Invoices({ staff }) {
         <div style={{ textAlign: 'center', padding: '4rem 2rem', background: '#fff', borderRadius: '14px', border: '1px solid #e8e6e0' }}>
           <div style={{ width: '56px', height: '56px', borderRadius: '16px', background: '#E6F1FB', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 14px', fontSize: '24px' }}>🧾</div>
           <div style={{ fontSize: '16px', fontWeight: '600', color: '#1a1a18', marginBottom: '6px', letterSpacing: '-0.2px' }}>No invoices for {months[selectedMonth-1]} {selectedYear}</div>
-          <div style={{ fontSize: '13px', color: '#888780', marginBottom: '1.5rem' }}>Generate an invoice run to create invoices from approved time entries.</div>
-          <button onClick={generateRun} disabled={generating}
+          <div style={{ fontSize: '13px', color: '#888780', marginBottom: '1.5rem' }}>Create a new invoice from an existing case or association.</div>
+          <button onClick={openCreateForm}
             style={{ padding: '9px 20px', background: 'linear-gradient(135deg, #0C447C 0%, #185FA5 100%)', color: '#fff', border: 'none', borderRadius: '10px', fontSize: '13px', fontWeight: '600', cursor: 'pointer', boxShadow: '0 2px 8px rgba(12,68,124,0.28)' }}>
-            {generating ? 'Generating…' : 'Generate invoice run'}
+            New invoice
           </button>
         </div>
       ) : (
@@ -832,10 +760,11 @@ export default function Invoices({ staff }) {
                               <td style={{ padding: '9px 10px', borderBottom: '0.5px solid #f1efe8' }}>{statusBadge(inv.status)}</td>
                               <td style={{ padding: '9px 10px', borderBottom: '0.5px solid #f1efe8' }}>
                                 <div style={{ display: 'flex', gap: '5px', alignItems: 'center' }}>
-                                  <button onClick={() => setPreviewInvoice(inv)} style={{ padding: '3px 10px', border: '0.5px solid #d3d1c7', borderRadius: '6px', background: '#fff', color: '#5f5e5a', fontSize: '11px', cursor: 'pointer' }}>Preview</button>
+                                  <button onClick={() => { setPreviewInvoice(inv); setShowNonBillableItems(false) }} style={{ padding: '3px 10px', border: '0.5px solid #d3d1c7', borderRadius: '6px', background: '#fff', color: '#5f5e5a', fontSize: '11px', cursor: 'pointer' }}>Preview</button>
                                   <button onClick={() => printInvoice(inv)} style={{ padding: '3px 10px', border: '0.5px solid #d3d1c7', borderRadius: '6px', background: '#fff', color: '#5f5e5a', fontSize: '11px', cursor: 'pointer' }}>🖨</button>
                                   {inv.status === 'draft' && <button onClick={() => updateInvoiceStatus(inv.id, 'sent')} style={{ padding: '3px 10px', border: 'none', borderRadius: '6px', background: '#E6F1FB', color: '#0C447C', fontSize: '11px', fontWeight: '500', cursor: 'pointer' }}>Mark sent</button>}
                                   {inv.status === 'sent' && <button onClick={() => updateInvoiceStatus(inv.id, 'paid')} style={{ padding: '3px 10px', border: 'none', borderRadius: '6px', background: '#eaf3de', color: '#27500a', fontSize: '11px', fontWeight: '500', cursor: 'pointer' }}>Mark paid</button>}
+                                  <button onClick={() => setInvoiceToDelete(inv)} style={{ padding: '3px 10px', border: '0.5px solid #f09595', borderRadius: '6px', background: '#fff', color: '#a32d2d', fontSize: '11px', cursor: 'pointer' }}>Delete</button>
                                 </div>
                               </td>
                             </tr>
@@ -854,6 +783,7 @@ export default function Invoices({ staff }) {
                                 <div style={{ display: 'flex', gap: '5px' }}>
                                   <button onClick={() => setPreviewInvoice(summary)} style={{ padding: '3px 10px', border: '0.5px solid #d3d1c7', borderRadius: '6px', background: '#fff', color: '#5f5e5a', fontSize: '11px', cursor: 'pointer' }}>Preview</button>
                                   <button onClick={() => printInvoice(summary)} style={{ padding: '3px 10px', border: '0.5px solid #d3d1c7', borderRadius: '6px', background: '#fff', color: '#5f5e5a', fontSize: '11px', cursor: 'pointer' }}>🖨</button>
+                                  <button onClick={() => setInvoiceToDelete(summary)} style={{ padding: '3px 10px', border: '0.5px solid #f09595', borderRadius: '6px', background: '#fff', color: '#a32d2d', fontSize: '11px', cursor: 'pointer' }}>Delete</button>
                                 </div>
                               </td>
                             </tr>
@@ -914,10 +844,11 @@ export default function Invoices({ staff }) {
                         <td style={{ padding: '9px 10px', borderBottom: '0.5px solid #f1efe8' }}>{statusBadge(inv.status)}</td>
                         <td style={{ padding: '9px 10px', borderBottom: '0.5px solid #f1efe8' }}>
                           <div style={{ display: 'flex', gap: '5px', alignItems: 'center' }}>
-                            <button onClick={() => setPreviewInvoice(inv)} style={{ padding: '3px 10px', border: '0.5px solid #d3d1c7', borderRadius: '6px', background: '#fff', color: '#5f5e5a', fontSize: '11px', cursor: 'pointer' }}>Preview</button>
+                            <button onClick={() => { setPreviewInvoice(inv); setShowNonBillableItems(false) }} style={{ padding: '3px 10px', border: '0.5px solid #d3d1c7', borderRadius: '6px', background: '#fff', color: '#5f5e5a', fontSize: '11px', cursor: 'pointer' }}>Preview</button>
                             <button onClick={() => printInvoice(inv)} style={{ padding: '3px 10px', border: '0.5px solid #d3d1c7', borderRadius: '6px', background: '#fff', color: '#5f5e5a', fontSize: '11px', cursor: 'pointer' }}>🖨</button>
                             {inv.status === 'draft' && <button onClick={() => updateInvoiceStatus(inv.id, 'sent')} style={{ padding: '3px 10px', border: 'none', borderRadius: '6px', background: '#E6F1FB', color: '#0C447C', fontSize: '11px', fontWeight: '500', cursor: 'pointer' }}>Mark sent</button>}
                             {inv.status === 'sent' && <button onClick={() => updateInvoiceStatus(inv.id, 'paid')} style={{ padding: '3px 10px', border: 'none', borderRadius: '6px', background: '#eaf3de', color: '#27500a', fontSize: '11px', fontWeight: '500', cursor: 'pointer' }}>Mark paid</button>}
+                            <button onClick={() => setInvoiceToDelete(inv)} style={{ padding: '3px 10px', border: '0.5px solid #f09595', borderRadius: '6px', background: '#fff', color: '#a32d2d', fontSize: '11px', cursor: 'pointer' }}>Delete</button>
                           </div>
                         </td>
                       </tr>
@@ -946,6 +877,9 @@ export default function Invoices({ staff }) {
                 <button onClick={() => printInvoice(previewInvoice)} style={{ padding: '6px 14px', border: '1px solid rgba(255,255,255,0.3)', borderRadius: '8px', background: 'rgba(255,255,255,0.12)', fontSize: '12px', cursor: 'pointer', color: '#fff', display: 'flex', alignItems: 'center', gap: '5px' }}>
                   <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="3" y="7" width="10" height="7" rx="1"/><path d="M3 9V4a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v5M5 3V2h6v1"/></svg>
                   Print / PDF
+                </button>
+                <button onClick={() => setInvoiceToDelete(previewInvoice)} style={{ padding: '6px 14px', border: '1px solid rgba(255,255,255,0.3)', borderRadius: '8px', background: 'rgba(255,255,255,0.12)', fontSize: '12px', cursor: 'pointer', color: '#fff' }}>
+                  Delete
                 </button>
                 <button onClick={() => setPreviewInvoice(null)} style={{ padding: '6px 12px', border: 'none', borderRadius: '8px', background: 'rgba(255,255,255,0.18)', color: '#fff', fontSize: '18px', cursor: 'pointer', lineHeight: 1, display: 'flex', alignItems: 'center' }}>✕</button>
               </div>
@@ -994,16 +928,207 @@ export default function Invoices({ staff }) {
                   </div>
                 </div>
               </div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem', paddingBottom: '0.75rem', borderBottom: '1px solid #d3d1c7' }}>
+                <div style={{ fontSize: '12px', fontWeight: '500', color: '#2c2c2a' }}>Line Items</div>
+                <button
+                  type="button"
+                  onClick={() => setShowNonBillableItems(!showNonBillableItems)}
+                  style={{ fontSize: '11px', color: '#185FA5', background: 'none', border: 'none', cursor: 'pointer', fontWeight: '500' }}
+                >
+                  {showNonBillableItems ? '− Hide non-billable items' : '+ Show non-billable items'}
+                </button>
+              </div>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px', marginBottom: '1rem' }}>
                 <thead>
                   <tr>
-                    {['Date', 'Attorney', 'Description', 'Hours', 'Rate', 'Amount'].map(h => (
-                      <th key={h} style={{ textAlign: h === 'Hours' || h === 'Rate' || h === 'Amount' ? 'right' : 'left', padding: '7px 8px', background: '#0C447C', color: '#fff', fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{h}</th>
+                    {['Date', 'Description', 'Hours/Qty', 'Rate', 'Billable', 'Amount'].map(h => (
+                      <th key={h} style={{ textAlign: h === 'Hours/Qty' || h === 'Rate' || h === 'Amount' ? 'right' : 'left', padding: '7px 8px', background: '#0C447C', color: '#fff', fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  <tr><td colSpan={6} style={{ padding: '12px 8px', color: '#888780', fontStyle: 'italic', textAlign: 'center', fontSize: '12px' }}>Time entries from approved timesheets will appear here.</td></tr>
+                  {(() => {
+                    const approvedTimeEntries = (previewInvoice.cases?.time_entries || [])
+                      .filter(entry => entry.status === 'approved' && entry.billable !== false && entry.entry_date >= createForm.startDate && entry.entry_date <= createForm.endDate)
+                    const nonBillableTimeEntries = (previewInvoice.cases?.time_entries || [])
+                      .filter(entry => entry.status === 'approved' && entry.billable === false && entry.entry_date >= createForm.startDate && entry.entry_date <= createForm.endDate)
+                    const billableExpenses = (previewInvoice.cases?.case_expenses || [])
+                      .filter(expense => expense.billable && expense.expense_date >= createForm.startDate && expense.expense_date <= createForm.endDate)
+                    const nonBillableExpenses = (previewInvoice.cases?.case_expenses || [])
+                      .filter(expense => expense.billable === false && expense.expense_date >= createForm.startDate && expense.expense_date <= createForm.endDate)
+                    const billableTimeEntryExpenses = approvedTimeEntries.flatMap(entry =>
+                      (entry.time_entry_expenses || []).filter(exp => exp.billable && exp.expense_date >= createForm.startDate && exp.expense_date <= createForm.endDate)
+                    )
+                    const nonBillableTimeEntryExpenses = (previewInvoice.cases?.time_entries || [])
+                      .filter(entry => entry.status === 'approved' && entry.entry_date >= createForm.startDate && entry.entry_date <= createForm.endDate)
+                      .flatMap(entry =>
+                        (entry.time_entry_expenses || []).filter(exp => exp.billable === false && exp.expense_date >= createForm.startDate && exp.expense_date <= createForm.endDate)
+                      )
+                    
+                    const hasAnyItems = approvedTimeEntries.length > 0 || billableExpenses.length > 0 || billableTimeEntryExpenses.length > 0 || (showNonBillableItems && (nonBillableTimeEntries.length > 0 || nonBillableExpenses.length > 0 || nonBillableTimeEntryExpenses.length > 0))
+
+                    if (!hasAnyItems) {
+                      return (
+                        <tr>
+                          <td colSpan={6} style={{ padding: '12px 8px', color: '#888780', fontStyle: 'italic', textAlign: 'center', fontSize: '12px' }}>
+                            No billable items for the selected period.
+                          </td>
+                        </tr>
+                      )
+                    }
+
+                    return (
+                      <>
+                        {approvedTimeEntries.map(entry => (
+                          <tr key={`time-${entry.id}`} style={{ borderBottom: '0.5px solid #f1efe8' }}>
+                            <td style={{ padding: '7px 8px', color: '#888780' }}>
+                              {new Date(entry.entry_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                            </td>
+                            <td style={{ padding: '7px 8px', color: '#2c2c2a', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {entry.description}
+                            </td>
+                            <td style={{ padding: '7px 8px', textAlign: 'right', color: '#2c2c2a', fontWeight: '500' }}>{entry.hours?.toFixed(1)}</td>
+                            <td style={{ padding: '7px 8px', textAlign: 'right', color: '#888780' }}>
+                              {entry.computed_amount && entry.hours ? `$${(entry.computed_amount / entry.hours).toFixed(0)}/hr` : '—'}
+                            </td>
+                            <td style={{ padding: '7px 8px', textAlign: 'center' }}>
+                              <span style={{ background: '#eaf3de', color: '#27500a', padding: '2px 6px', borderRadius: '12px', fontSize: '10px', fontWeight: '500' }}>
+                                Yes
+                              </span>
+                            </td>
+                            <td style={{ padding: '7px 8px', textAlign: 'right', color: '#2c2c2a', fontWeight: '500' }}>${(entry.computed_amount || 0).toFixed(2)}</td>
+                          </tr>
+                        ))}
+                        {billableExpenses.map(expense => (
+                          <tr key={`exp-${expense.id}`} style={{ borderBottom: '0.5px solid #f1efe8' }}>
+                            <td style={{ padding: '7px 8px', color: '#888780' }}>
+                              {new Date(expense.expense_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                            </td>
+                            <td style={{ padding: '7px 8px', color: '#2c2c2a', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {expense.title}
+                            </td>
+                            <td style={{ padding: '7px 8px', textAlign: 'right', color: '#888780' }}>—</td>
+                            <td style={{ padding: '7px 8px', textAlign: 'right', color: '#888780' }}>—</td>
+                            <td style={{ padding: '7px 8px', textAlign: 'center' }}>
+                              <span style={{ background: '#eaf3de', color: '#27500a', padding: '2px 6px', borderRadius: '12px', fontSize: '10px', fontWeight: '500' }}>
+                                Yes
+                              </span>
+                            </td>
+                            <td style={{ padding: '7px 8px', textAlign: 'right', color: '#2c2c2a', fontWeight: '500' }}>${(Number(expense.amount) || 0).toFixed(2)}</td>
+                          </tr>
+                        ))}
+                        {billableTimeEntryExpenses.map((expense, idx) => (
+                          <tr key={`time-exp-${idx}`} style={{ borderBottom: '0.5px solid #f1efe8' }}>
+                            <td style={{ padding: '7px 8px', color: '#888780' }}>
+                              {new Date(expense.expense_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                            </td>
+                            <td style={{ padding: '7px 8px', color: '#2c2c2a', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {expense.title}
+                            </td>
+                            <td style={{ padding: '7px 8px', textAlign: 'right', color: '#888780' }}>—</td>
+                            <td style={{ padding: '7px 8px', textAlign: 'right', color: '#888780' }}>—</td>
+                            <td style={{ padding: '7px 8px', textAlign: 'center' }}>
+                              <span style={{ background: '#eaf3de', color: '#27500a', padding: '2px 6px', borderRadius: '12px', fontSize: '10px', fontWeight: '500' }}>
+                                Yes
+                              </span>
+                            </td>
+                            <td style={{ padding: '7px 8px', textAlign: 'right', color: '#2c2c2a', fontWeight: '500' }}>${(Number(expense.amount) || 0).toFixed(2)}</td>
+                          </tr>
+                        ))}
+
+                        {/* Non-billable items section */}
+                        {showNonBillableItems && (
+                          <>
+                            {nonBillableTimeEntries.length > 0 && (
+                              <>
+                                <tr style={{ background: '#FEF5F5' }}>
+                                  <td colSpan={6} style={{ padding: '8px 8px', fontSize: '11px', fontWeight: '500', color: '#791F1F' }}>
+                                    — NO CHARGE ITEMS —
+                                  </td>
+                                </tr>
+                                {nonBillableTimeEntries.map(entry => (
+                                  <tr key={`non-time-${entry.id}`} style={{ borderBottom: '0.5px solid #f1efe8', background: '#FEF9F9', opacity: 0.85 }}>
+                                    <td style={{ padding: '7px 8px', color: '#888780' }}>
+                                      {new Date(entry.entry_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                                    </td>
+                                    <td style={{ padding: '7px 8px', color: '#2c2c2a', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                      {entry.description}
+                                    </td>
+                                    <td style={{ padding: '7px 8px', textAlign: 'right', color: '#2c2c2a', fontWeight: '500' }}>{entry.hours?.toFixed(1)}</td>
+                                    <td style={{ padding: '7px 8px', textAlign: 'right', color: '#888780' }}>—</td>
+                                    <td style={{ padding: '7px 8px', textAlign: 'center' }}>
+                                      <span style={{ background: '#FCEBEB', color: '#791F1F', padding: '2px 6px', borderRadius: '12px', fontSize: '10px', fontWeight: '500' }}>
+                                        No
+                                      </span>
+                                    </td>
+                                    <td style={{ padding: '7px 8px', textAlign: 'right', color: '#791F1F', fontWeight: '500' }}>No Charge</td>
+                                  </tr>
+                                ))}
+                              </>
+                            )}
+                            {nonBillableExpenses.length > 0 && (
+                              <>
+                                {nonBillableTimeEntries.length === 0 && (
+                                  <tr style={{ background: '#FEF5F5' }}>
+                                    <td colSpan={6} style={{ padding: '8px 8px', fontSize: '11px', fontWeight: '500', color: '#791F1F' }}>
+                                      — NO CHARGE ITEMS —
+                                    </td>
+                                  </tr>
+                                )}
+                                {nonBillableExpenses.map(expense => (
+                                  <tr key={`non-exp-${expense.id}`} style={{ borderBottom: '0.5px solid #f1efe8', background: '#FEF9F9', opacity: 0.85 }}>
+                                    <td style={{ padding: '7px 8px', color: '#888780' }}>
+                                      {new Date(expense.expense_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                                    </td>
+                                    <td style={{ padding: '7px 8px', color: '#2c2c2a', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                      {expense.title}
+                                    </td>
+                                    <td style={{ padding: '7px 8px', textAlign: 'right', color: '#888780' }}>—</td>
+                                    <td style={{ padding: '7px 8px', textAlign: 'right', color: '#888780' }}>—</td>
+                                    <td style={{ padding: '7px 8px', textAlign: 'center' }}>
+                                      <span style={{ background: '#FCEBEB', color: '#791F1F', padding: '2px 6px', borderRadius: '12px', fontSize: '10px', fontWeight: '500' }}>
+                                        No
+                                      </span>
+                                    </td>
+                                    <td style={{ padding: '7px 8px', textAlign: 'right', color: '#791F1F', fontWeight: '500' }}>No Charge</td>
+                                  </tr>
+                                ))}
+                              </>
+                            )}
+                            {nonBillableTimeEntryExpenses.length > 0 && (
+                              <>
+                                {nonBillableTimeEntries.length === 0 && nonBillableExpenses.length === 0 && (
+                                  <tr style={{ background: '#FEF5F5' }}>
+                                    <td colSpan={6} style={{ padding: '8px 8px', fontSize: '11px', fontWeight: '500', color: '#791F1F' }}>
+                                      — NO CHARGE ITEMS —
+                                    </td>
+                                  </tr>
+                                )}
+                                {nonBillableTimeEntryExpenses.map((expense, idx) => (
+                                  <tr key={`non-time-exp-${idx}`} style={{ borderBottom: '0.5px solid #f1efe8', background: '#FEF9F9', opacity: 0.85 }}>
+                                    <td style={{ padding: '7px 8px', color: '#888780' }}>
+                                      {new Date(expense.expense_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                                    </td>
+                                    <td style={{ padding: '7px 8px', color: '#2c2c2a', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                      {expense.title}
+                                    </td>
+                                    <td style={{ padding: '7px 8px', textAlign: 'right', color: '#888780' }}>—</td>
+                                    <td style={{ padding: '7px 8px', textAlign: 'right', color: '#888780' }}>—</td>
+                                    <td style={{ padding: '7px 8px', textAlign: 'center' }}>
+                                      <span style={{ background: '#FCEBEB', color: '#791F1F', padding: '2px 6px', borderRadius: '12px', fontSize: '10px', fontWeight: '500' }}>
+                                        No
+                                      </span>
+                                    </td>
+                                    <td style={{ padding: '7px 8px', textAlign: 'right', color: '#791F1F', fontWeight: '500' }}>No Charge</td>
+                                  </tr>
+                                ))}
+                              </>
+                            )}
+                          </>
+                        )}
+                      </>
+                    )
+                  })()}
                 </tbody>
               </table>
               <div style={{ marginLeft: 'auto', width: '260px' }}>
@@ -1023,6 +1148,31 @@ export default function Invoices({ staff }) {
               <div style={{ marginTop: '1.5rem', paddingTop: '1rem', borderTop: '0.5px solid #d3d1c7', fontSize: '11px', color: '#888780', textAlign: 'center' }}>
                 Please remit payment within 15 days. Make checks payable to {firmInfo.name}.<br />
                 Questions? Contact {firmInfo.email} · {firmInfo.phone}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {invoiceToDelete && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', backdropFilter: 'blur(3px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 120, padding: '1rem' }}>
+          <div style={{ width: '100%', maxWidth: '380px', background: '#fff', borderRadius: '14px', border: '1px solid #e8e6e0', boxShadow: '0 18px 48px rgba(0,0,0,0.18)', overflow: 'hidden' }}>
+            <div style={{ padding: '1rem 1.25rem', borderBottom: '1px solid #f1efe8', background: '#faf9f7' }}>
+              <div style={{ fontSize: '15px', fontWeight: '600', color: '#2c2c2a' }}>Delete invoice?</div>
+              <div style={{ fontSize: '12px', color: '#888780', marginTop: '3px' }}>This action cannot be undone.</div>
+            </div>
+            <div style={{ padding: '1.25rem' }}>
+              <div style={{ fontSize: '13px', color: '#5f5e5a', lineHeight: '1.6', marginBottom: '1rem' }}>
+                Delete <strong style={{ color: '#2c2c2a' }}>{invoiceToDelete.invoice_number || 'this invoice'}</strong>
+                {invoiceToDelete.cases?.sb_number ? <> for <strong style={{ color: '#2c2c2a' }}>{invoiceToDelete.cases.sb_number}</strong></> : null}?
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                <button type="button" onClick={() => setInvoiceToDelete(null)} disabled={deletingInvoice} style={{ padding: '8px 14px', border: '1px solid #d3d1c7', borderRadius: '8px', background: '#fff', color: '#5f5e5a', fontSize: '13px', cursor: deletingInvoice ? 'not-allowed' : 'pointer' }}>
+                  Cancel
+                </button>
+                <button type="button" onClick={deleteInvoice} disabled={deletingInvoice} style={{ padding: '8px 14px', border: 'none', borderRadius: '8px', background: deletingInvoice ? '#b4b2a9' : '#a32d2d', color: '#fff', fontSize: '13px', fontWeight: '600', cursor: deletingInvoice ? 'not-allowed' : 'pointer' }}>
+                  {deletingInvoice ? 'Deleting…' : 'Delete invoice'}
+                </button>
               </div>
             </div>
           </div>

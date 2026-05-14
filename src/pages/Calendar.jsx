@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../supabaseClient'
 import { getCalendarEventSearchValues, matchesSearch } from '../lib/search'
+import { FormActions, FormModal, FormStatusMessage, PageNotice } from '../components/FormUi'
 
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December']
 const DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
@@ -10,6 +11,7 @@ const EVENT_TYPES = [
   { value: 'meeting', label: 'Client meeting', color: '#1D9E75', bg: '#E1F5EE', text: '#085041' },
   { value: 'deadline', label: 'Deadline / filing', color: '#E24B4A', bg: '#FCEBEB', text: '#791F1F' },
   { value: 'reminder', label: 'Follow-up reminder', color: '#EF9F27', bg: '#FAEEDA', text: '#633806' },
+  { value: 'other', label: 'Other', color: '#6B7280', bg: '#F3F4F6', text: '#374151' },
 ]
 
 function getEventStyle(type) {
@@ -84,16 +86,8 @@ function NewEventForm({ staff, attorneys, selectedDate, onClose, onSaved }) {
   const fieldStyle = { marginBottom: '14px' }
 
   return (
-    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', zIndex: 100, padding: '2rem 1rem', overflowY: 'auto' }}>
-      <div style={{ background: '#fff', borderRadius: '12px', width: '100%', maxWidth: '480px', padding: '1.75rem', border: '0.5px solid #d3d1c7', marginBottom: '2rem' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.25rem' }}>
-          <div>
-            <div style={{ fontSize: '16px', fontWeight: '500', color: '#2c2c2a' }}>New calendar event</div>
-            <div style={{ fontSize: '12px', color: '#888780', marginTop: '2px' }}>Notifications: 1 day + 1 hour before</div>
-          </div>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: '20px', color: '#888780', cursor: 'pointer' }}>✕</button>
-        </div>
-        <form onSubmit={handleSubmit}>
+    <FormModal title="New calendar event" subtitle="Notifications: 1 day and 1 hour before" onClose={onClose} maxWidth="480px">
+      <form onSubmit={handleSubmit}>
           <div style={fieldStyle}>
             <label style={labelStyle}>Event type</label>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
@@ -170,16 +164,10 @@ function NewEventForm({ staff, attorneys, selectedDate, onClose, onSaved }) {
               ))}
             </div>
           </div>
-          {error && <div style={{ background: '#fcebeb', border: '0.5px solid #f09595', borderRadius: '8px', padding: '8px 12px', fontSize: '12px', color: '#a32d2d', marginBottom: '1rem' }}>{error}</div>}
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
-            <button type="button" onClick={onClose} style={{ padding: '8px 18px', border: '0.5px solid #d3d1c7', borderRadius: '8px', background: '#fff', fontSize: '13px', cursor: 'pointer', color: '#5f5e5a' }}>Cancel</button>
-            <button type="submit" disabled={saving} style={{ padding: '8px 18px', border: 'none', borderRadius: '8px', background: saving ? '#888' : '#0C447C', color: '#fff', fontSize: '13px', fontWeight: '500', cursor: saving ? 'not-allowed' : 'pointer' }}>
-              {saving ? 'Saving...' : 'Save event'}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
+        <FormStatusMessage message={error} />
+        <FormActions onCancel={onClose} saving={saving} saveLabel="Save event" />
+      </form>
+    </FormModal>
   )
 }
 
@@ -256,6 +244,7 @@ export default function Calendar({ staff }) {
   const [showNewEvent, setShowNewEvent] = useState(false)
   const [newEventDate, setNewEventDate] = useState(null)
   const [selectedEvent, setSelectedEvent] = useState(null)
+  const [notice, setNotice] = useState(null)
 
   useEffect(() => {
     let cancelled = false
@@ -335,6 +324,7 @@ export default function Calendar({ staff }) {
 
   return (
     <div style={{ padding: '1.25rem', fontFamily: 'sans-serif', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+      <PageNotice notice={notice} onDismiss={() => setNotice(null)} />
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
         <div style={{ fontSize: '15px', fontWeight: '500', color: '#2c2c2a' }}>Calendar</div>
         <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
@@ -456,13 +446,21 @@ export default function Calendar({ staff }) {
       {showNewEvent && (
         <NewEventForm staff={staff} attorneys={attorneys} selectedDate={newEventDate}
           onClose={() => setShowNewEvent(false)}
-          onSaved={(newEv) => { setEvents(prev => [...prev, newEv]); setShowNewEvent(false) }}
+          onSaved={(newEv) => {
+            setEvents(prev => [...prev, newEv])
+            setShowNewEvent(false)
+            setNotice({ type: 'success', message: 'Calendar event saved successfully.' })
+          }}
         />
       )}
       {selectedEvent && (
         <EventDetail event={selectedEvent} staff={staff}
           onClose={() => setSelectedEvent(null)}
-          onDeleted={(id) => { setEvents(prev => prev.filter(e => e.id !== id)); setSelectedEvent(null) }}
+          onDeleted={(id) => {
+            setEvents(prev => prev.filter(e => e.id !== id))
+            setSelectedEvent(null)
+            setNotice({ type: 'success', message: 'Calendar event deleted.' })
+          }}
         />
       )}
     </div>

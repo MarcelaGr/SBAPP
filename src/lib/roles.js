@@ -6,6 +6,7 @@ export const ROLES = {
 export const INITIAL_USER_SEEDS = [
   { name: 'Muna', email: 'muna@stonebusailah.com', role: ROLES.admin },
   { name: 'Marcela', email: 'marcela@stonebusailah.com', role: ROLES.attorney },
+  { name: 'M. Grecco', email: 'm.grecco@police-defense.com', role: ROLES.attorney },
 ]
 
 export function normalizeRole(value, fallback = ROLES.attorney) {

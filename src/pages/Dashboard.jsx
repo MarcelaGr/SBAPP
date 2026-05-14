@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../supabaseClient'
 
-export default function Dashboard({ staff, setCurrentPage, isAttorney }) {
+export default function Dashboard({ staff, setCurrentPage }) {
   const [data, setData] = useState({
     cases: [], entries: [], events: [], invoices: [], comments: [], reports: []
   })
@@ -10,8 +10,6 @@ export default function Dashboard({ staff, setCurrentPage, isAttorney }) {
   const today = new Date().toISOString().split('T')[0]
   const thisMonth = new Date().getMonth() + 1
   const thisYear = new Date().getFullYear()
-
-  useEffect(() => { fetchAll() }, [])
 
   async function fetchAll() {
     setLoading(true)
@@ -60,7 +58,7 @@ export default function Dashboard({ staff, setCurrentPage, isAttorney }) {
 
   const formatRelative = (ts) => {
     if (!ts) return ''
-    const diff = Date.now() - new Date(ts).getTime()
+    const diff = new Date().getTime() - new Date(ts).getTime()
     const mins = Math.floor(diff / 60000)
     const hrs = Math.floor(diff / 3600000)
     const days = Math.floor(diff / 86400000)
@@ -69,6 +67,8 @@ export default function Dashboard({ staff, setCurrentPage, isAttorney }) {
     if (hrs < 24) return `${hrs}h ago`
     return `${days}d ago`
   }
+
+  useEffect(() => { fetchAll() }, [])
 
   const eventTypeStyle = (type) => {
     const map = {
@@ -103,8 +103,6 @@ export default function Dashboard({ staff, setCurrentPage, isAttorney }) {
   // Status reports stats
   const pendingReports = data.reports.filter(r => r.status === 'pending')
   const approvedReports = data.reports.filter(r => r.status === 'approved') // approved but not sent yet
-  const myPendingReports = data.reports.filter(r => r.attorney_id === staff?.id && r.status === 'pending')
-
   const activity = [
     ...data.entries.slice(0, 10).map(e => ({ type: 'timeentry', data: e, ts: e.created_at })),
     ...data.comments.slice(0, 10).map(c => ({ type: 'comment', data: c, ts: c.created_at })),
@@ -140,7 +138,7 @@ export default function Dashboard({ staff, setCurrentPage, isAttorney }) {
             { label: 'Active cases', value: activeCases.length, sub: `${data.cases.filter(c=>c.status==='closed').length} closed`, action: () => setCurrentPage('cases') },
             { label: 'Pending approvals', value: pendingEntries.length + reviewEntries.length, sub: `${reviewEntries.length} need review`, action: () => setCurrentPage('timesheets') },
             { label: 'Status reports', value: pendingReports.length, sub: `${approvedReports.length} approved, pending send`, action: () => setCurrentPage('cases'), alert: pendingReports.length > 0 || approvedReports.length > 0 },
-            { label: `Invoiced (${new Date().toLocaleString('en-US',{month:'short'})})`, value: `$${totalInvoiced.toFixed(0)}`, sub: `$${unpaidInvoices.toFixed(0)} outstanding`, action: () => setCurrentPage('invoices') },
+            { label: `Billed (${new Date().toLocaleString('en-US',{month:'short'})})`, value: `$${totalInvoiced.toFixed(0)}`, sub: `$${unpaidInvoices.toFixed(0)} outstanding`, action: () => setCurrentPage('billing') },
             { label: "Today's events", value: todayEvents.length, sub: `${upcomingEvents.length} more upcoming`, action: () => setCurrentPage('calendar') },
           ].map(s => (
             <div key={s.label} onClick={s.action}
@@ -395,12 +393,12 @@ export default function Dashboard({ staff, setCurrentPage, isAttorney }) {
             })}
           </div>
 
-          {/* Admin only: invoices summary */}
+          {/* Admin only: billing summary */}
           {isAdmin && (
             <div style={{ background: '#fff', border: '0.5px solid #d3d1c7', borderRadius: '12px', padding: '1.25rem' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
-                <div style={{ fontSize: '13px', fontWeight: '500', color: '#2c2c2a' }}>Invoices — {new Date().toLocaleString('en-US', { month: 'long' })} {thisYear}</div>
-                <button onClick={() => setCurrentPage('invoices')} style={{ fontSize: '12px', color: '#185FA5', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>View all ↗</button>
+                <div style={{ fontSize: '13px', fontWeight: '500', color: '#2c2c2a' }}>Billing — {new Date().toLocaleString('en-US', { month: 'long' })} {thisYear}</div>
+                <button onClick={() => setCurrentPage('billing')} style={{ fontSize: '12px', color: '#185FA5', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>View all ↗</button>
               </div>
               {data.invoices.filter(i => i.invoice_kind === 'case').length === 0 ? (
                 <div style={{ textAlign: 'center', padding: '1rem', color: '#b4b2a9', fontSize: '13px' }}>No invoices generated yet this month.</div>
